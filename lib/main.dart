@@ -449,8 +449,10 @@ class _HomePageState extends State<HomePage> {
       final encodedUrl = Uri.encodeComponent(url);
 
       final response = await http.get(
-        Uri.parse('http://localhost:3000/product?url=$encodedUrl'),
-      );
+  Uri.parse(
+    'https://sale-scout-api.onrender.com/product?url=$encodedUrl',
+  ),
+);
 
       final data = jsonDecode(response.body);
 
