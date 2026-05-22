@@ -49,9 +49,7 @@ class AuthGate extends StatelessWidget {
           );
         }
 
-        if (snapshot.hasData) {
-          return const HomePage();
-        }
+        if (snapshot.hasData) return const HomePage();
 
         return const LoginPage();
       },
@@ -123,22 +121,28 @@ class _LoginPageState extends State<LoginPage> {
 
   @override
   Widget build(BuildContext context) {
+    final isPhone = MediaQuery.of(context).size.width < 600;
+
     return Scaffold(
       backgroundColor: green,
       body: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.all(28),
+          padding: EdgeInsets.all(isPhone ? 22 : 28),
           child: Center(
             child: SingleChildScrollView(
               child: Column(
                 children: [
-                  Image.asset('assets/sale_scout_logo.png', height: 190),
+                  Image.asset(
+                    'assets/sale_scout_logo.png',
+                    height: isPhone ? 130 : 190,
+                  ),
                   const SizedBox(height: 24),
                   Text(
                     isLogin ? 'Welcome back, Scout' : 'Create your account',
+                    textAlign: TextAlign.center,
                     style: TextStyle(
                       color: cream,
-                      fontSize: 30,
+                      fontSize: isPhone ? 26 : 30,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
@@ -449,14 +453,19 @@ class _HomePageState extends State<HomePage> {
       final encodedUrl = Uri.encodeComponent(url);
 
       final response = await http.get(
-  Uri.parse(
-    'https://sale-scout-api.onrender.com/product?url=$encodedUrl',
-  ),
-);
+        Uri.parse(
+          'https://sale-scout-api.onrender.com/product?url=$encodedUrl',
+        ),
+      );
 
       final data = jsonDecode(response.body);
 
-      final newPrice = ((data['currentPrice'] ?? 0) as num).round();
+      final currentPriceValue = data['currentPrice'];
+
+      final newPrice = currentPriceValue is num
+          ? currentPriceValue.round()
+          : int.tryParse(currentPriceValue.toString()) ?? 0;
+
       final oldPrice = oldItem?.currentPrice;
 
       final history = oldItem == null
@@ -663,20 +672,26 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     final email = FirebaseAuth.instance.currentUser?.email ?? '';
     final remaining = itemLimit - trackedItems.length;
+    final isPhone = MediaQuery.of(context).size.width < 600;
 
     return Scaffold(
       backgroundColor: green,
       body: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(22, 10, 22, 22),
+          padding: EdgeInsets.fromLTRB(
+            isPhone ? 14 : 22,
+            isPhone ? 6 : 10,
+            isPhone ? 14 : 22,
+            isPhone ? 12 : 22,
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               if (showDropAlert)
                 Container(
                   width: double.infinity,
-                  margin: const EdgeInsets.only(bottom: 10),
-                  padding: const EdgeInsets.all(13),
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
                     color: lightGreen,
                     borderRadius: BorderRadius.circular(16),
@@ -716,19 +731,23 @@ class _HomePageState extends State<HomePage> {
               Center(
                 child: Image.asset(
                   'assets/sale_scout_logo.png',
-                  height: 165,
+                  height: isPhone ? 85 : 165,
                 ),
               ),
-              const SizedBox(height: 8),
-              Row(
+              SizedBox(height: isPhone ? 4 : 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
                 children: [
                   _pill('🎖 $plan Plan', lightGreen, green),
-                  const SizedBox(width: 8),
                   _pill('Watching ${trackedItems.length}/$itemLimit', cream, green),
                 ],
               ),
-              const SizedBox(height: 10),
-              Row(
+              SizedBox(height: isPhone ? 8 : 10),
+              Wrap(
+                spacing: 10,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   Container(
                     padding: const EdgeInsets.symmetric(
@@ -745,38 +764,41 @@ class _HomePageState extends State<HomePage> {
                       style: TextStyle(
                         color: lightGreen,
                         fontWeight: FontWeight.bold,
+                        fontSize: isPhone ? 12 : 14,
                       ),
                     ),
                   ),
-                  const SizedBox(width: 10),
                   Text(
                     'Next scan in: ${countdown}s',
-                    style: TextStyle(color: cream.withOpacity(.68)),
+                    style: TextStyle(
+                      color: cream.withOpacity(.68),
+                      fontSize: isPhone ? 12 : 14,
+                    ),
                   ),
                 ],
               ),
-              const SizedBox(height: 17),
+              SizedBox(height: isPhone ? 10 : 17),
               Text(
                 'Track prices across the internet',
                 style: TextStyle(
                   color: cream,
-                  fontSize: 31,
+                  fontSize: isPhone ? 23 : 31,
                   height: 1.05,
                   fontWeight: FontWeight.bold,
                 ),
               ),
-              const SizedBox(height: 9),
+              SizedBox(height: isPhone ? 6 : 9),
               Text(
                 'Paste a product URL and Sale Scout will monitor it for price drops.',
                 style: TextStyle(
                   color: cream.withOpacity(.72),
-                  fontSize: 16,
+                  fontSize: isPhone ? 13 : 16,
                 ),
               ),
-              const SizedBox(height: 21),
+              SizedBox(height: isPhone ? 12 : 21),
               TextField(
                 controller: urlController,
-                style: TextStyle(color: cream, fontSize: 17),
+                style: TextStyle(color: cream, fontSize: isPhone ? 14 : 17),
                 decoration: InputDecoration(
                   hintText: remaining > 0
                       ? 'Paste product URL...'
@@ -785,6 +807,10 @@ class _HomePageState extends State<HomePage> {
                   prefixIcon: Icon(Icons.link, color: cream.withOpacity(.64)),
                   filled: true,
                   fillColor: fieldGreen,
+                  contentPadding: EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: isPhone ? 12 : 16,
+                  ),
                   enabled: remaining > 0,
                   enabledBorder: OutlineInputBorder(
                     borderSide: BorderSide(color: cream.withOpacity(.28)),
@@ -800,10 +826,10 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
               ),
-              const SizedBox(height: 15),
+              SizedBox(height: isPhone ? 10 : 15),
               SizedBox(
                 width: double.infinity,
-                height: 56,
+                height: isPhone ? 48 : 56,
                 child: ElevatedButton.icon(
                   onPressed: isLoading ? null : fetchProduct,
                   icon: isLoading
@@ -815,12 +841,11 @@ class _HomePageState extends State<HomePage> {
                       : const Icon(Icons.travel_explore),
                   label: Text(
                     isLoading
-                        ? 'Scouting Deal...'
-                        : remaining > 0
-                            ? 'Track Item'
-                            : 'Upgrade Tracking',
-                    style: const TextStyle(
-                      fontSize: 19,
+                        ? 'Scouting... up to 60 sec'
+                        : (remaining > 0 ? 'Track Item' : 'Upgrade Tracking'),
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: isPhone ? 14 : 19,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
@@ -834,16 +859,16 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
               ),
-              const SizedBox(height: 11),
+              SizedBox(height: isPhone ? 8 : 11),
               SizedBox(
                 width: double.infinity,
-                height: 50,
+                height: isPhone ? 44 : 50,
                 child: OutlinedButton.icon(
                   onPressed: isRefreshing ? null : () => refreshPrices(),
                   icon: const Icon(Icons.refresh),
                   label: Text(
                     isRefreshing ? 'Scanning Prices...' : 'Scan Now',
-                    style: const TextStyle(fontSize: 16),
+                    style: TextStyle(fontSize: isPhone ? 14 : 16),
                   ),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: cream,
@@ -854,7 +879,7 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
               ),
-              const SizedBox(height: 23),
+              SizedBox(height: isPhone ? 12 : 23),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -862,7 +887,7 @@ class _HomePageState extends State<HomePage> {
                     'Tracked Items',
                     style: TextStyle(
                       color: cream,
-                      fontSize: 28,
+                      fontSize: isPhone ? 23 : 28,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
@@ -871,16 +896,17 @@ class _HomePageState extends State<HomePage> {
                     style: TextStyle(
                       color: remaining > 0 ? lightGreen : gold,
                       fontWeight: FontWeight.bold,
+                      fontSize: isPhone ? 12 : 14,
                     ),
                   ),
                 ],
               ),
-              const SizedBox(height: 13),
+              SizedBox(height: isPhone ? 8 : 13),
               Expanded(
                 child: trackedItems.isEmpty
                     ? Center(
                         child: Container(
-                          padding: const EdgeInsets.all(22),
+                          padding: EdgeInsets.all(isPhone ? 16 : 22),
                           decoration: BoxDecoration(
                             color: cardGreen,
                             borderRadius: BorderRadius.circular(22),
@@ -892,14 +918,14 @@ class _HomePageState extends State<HomePage> {
                               Icon(
                                 Icons.travel_explore,
                                 color: lightGreen,
-                                size: 42,
+                                size: isPhone ? 34 : 42,
                               ),
                               const SizedBox(height: 12),
                               Text(
                                 'Scout your first deal',
                                 style: TextStyle(
                                   color: cream,
-                                  fontSize: 22,
+                                  fontSize: isPhone ? 19 : 22,
                                   fontWeight: FontWeight.bold,
                                 ),
                               ),
@@ -909,7 +935,7 @@ class _HomePageState extends State<HomePage> {
                                 textAlign: TextAlign.center,
                                 style: TextStyle(
                                   color: cream.withOpacity(.68),
-                                  fontSize: 15,
+                                  fontSize: isPhone ? 13 : 15,
                                 ),
                               ),
                             ],
@@ -917,13 +943,14 @@ class _HomePageState extends State<HomePage> {
                         ),
                       )
                     : ListView.builder(
+                        physics: const AlwaysScrollableScrollPhysics(),
                         itemCount: trackedItems.length,
                         itemBuilder: (context, index) {
                           final item = trackedItems[index];
 
                           return Container(
                             margin: const EdgeInsets.only(bottom: 17),
-                            padding: const EdgeInsets.all(17),
+                            padding: EdgeInsets.all(isPhone ? 13 : 17),
                             decoration: BoxDecoration(
                               color: cardGreen,
                               borderRadius: BorderRadius.circular(22),
@@ -936,189 +963,9 @@ class _HomePageState extends State<HomePage> {
                                 ),
                               ],
                             ),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(15),
-                                  child: Image.network(
-                                    item.imageUrl,
-                                    width: 98,
-                                    height: 98,
-                                    fit: BoxFit.cover,
-                                    errorBuilder: (_, __, ___) => Container(
-                                      width: 98,
-                                      height: 98,
-                                      color: fieldGreen,
-                                      child: Icon(
-                                        Icons.shopping_bag,
-                                        color: cream.withOpacity(.7),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 16),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      if (item.priceDropped)
-                                        _badge(
-                                          '⬇️ Price Dropped',
-                                          lightGreen,
-                                          green,
-                                        ),
-                                      Text(
-                                        item.title,
-                                        maxLines: 2,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          color: cream,
-                                          fontSize: 21,
-                                          height: 1.08,
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 5),
-                                      Text(
-                                        item.retailer,
-                                        style: TextStyle(
-                                          color: lightGreen,
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 9),
-                                      Text(
-                                        'Current Price: \$${item.currentPrice}',
-                                        style: TextStyle(
-                                          color: lightGreen,
-                                          fontSize: 21,
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                      Text(
-                                        item.originalPriceAvailable
-                                            ? 'Original Price: \$${item.originalPrice}'
-                                            : 'Original Price: Not available',
-                                        style: TextStyle(
-                                          color: cream.withOpacity(.82),
-                                          fontSize: 16,
-                                        ),
-                                      ),
-                                      Text(
-                                        item.originalPriceAvailable
-                                            ? 'Savings: \$${item.originalPrice - item.currentPrice}'
-                                            : 'Savings: Tracking...',
-                                        style: TextStyle(
-                                          color: gold,
-                                          fontSize: 17,
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 9),
-                                      Row(
-                                        children: [
-                                          Icon(
-                                            trendIcon(item),
-                                            color: trendColor(item),
-                                            size: 20,
-                                          ),
-                                          const SizedBox(width: 7),
-                                          Text(
-                                            trendLabel(item),
-                                            style: TextStyle(
-                                              color: trendColor(item),
-                                              fontWeight: FontWeight.bold,
-                                              fontSize: 13,
-                                            ),
-                                          ),
-                                          const SizedBox(width: 12),
-                                          Text(
-                                            'Low: \$${lowestPrice(item)}',
-                                            style: TextStyle(
-                                              color: cream.withOpacity(.68),
-                                              fontSize: 13,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                      const SizedBox(height: 9),
-                                      if (item.priceHistory.isNotEmpty)
-                                        SizedBox(
-                                          height: 52,
-                                          child: LineChart(
-                                            LineChartData(
-                                              minY:
-                                                  lowestPrice(item).toDouble() -
-                                                      5,
-                                              maxY:
-                                                  highestPrice(item).toDouble() +
-                                                      5,
-                                              gridData:
-                                                  const FlGridData(show: false),
-                                              titlesData:
-                                                  const FlTitlesData(show: false),
-                                              borderData:
-                                                  FlBorderData(show: false),
-                                              lineBarsData: [
-                                                LineChartBarData(
-                                                  spots: item.priceHistory
-                                                      .asMap()
-                                                      .entries
-                                                      .map(
-                                                        (entry) => FlSpot(
-                                                          entry.key.toDouble(),
-                                                          (entry.value['price']
-                                                                  as int)
-                                                              .toDouble(),
-                                                        ),
-                                                      )
-                                                      .toList(),
-                                                  isCurved: true,
-                                                  barWidth: 1.8,
-                                                  color: cream.withOpacity(.92),
-                                                  dotData: const FlDotData(
-                                                    show: false,
-                                                  ),
-                                                  belowBarData: BarAreaData(
-                                                    show: true,
-                                                    color: lightGreen
-                                                        .withOpacity(.09),
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                        ),
-                                      const SizedBox(height: 7),
-                                      Text(
-                                        'Last checked: ${item.lastChecked}',
-                                        style: TextStyle(
-                                          color: cream.withOpacity(.58),
-                                          fontSize: 12,
-                                        ),
-                                      ),
-                                      Text(
-                                        'Source: ${item.source}',
-                                        style: TextStyle(
-                                          color: cream.withOpacity(.45),
-                                          fontSize: 11,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                IconButton(
-                                  onPressed: () => removeItem(index),
-                                  icon: Icon(
-                                    Icons.delete_outline,
-                                    color: cream.withOpacity(.72),
-                                  ),
-                                ),
-                              ],
-                            ),
+                            child: isPhone
+                                ? _mobileProductCard(item, index)
+                                : _desktopProductCard(item, index),
                           );
                         },
                       ),
@@ -1127,6 +974,212 @@ class _HomePageState extends State<HomePage> {
           ),
         ),
       ),
+    );
+  }
+
+  Widget _desktopProductCard(ProductItem item, int index) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _productImage(item, 98),
+        const SizedBox(width: 16),
+        Expanded(child: _productDetails(item)),
+        IconButton(
+          onPressed: () => removeItem(index),
+          icon: Icon(Icons.delete_outline, color: cream.withOpacity(.72)),
+        ),
+      ],
+    );
+  }
+
+  Widget _mobileProductCard(ProductItem item, int index) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            _productImage(item, 74),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                item.title,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: cream,
+                  fontSize: 17,
+                  height: 1.1,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            IconButton(
+              onPressed: () => removeItem(index),
+              icon: Icon(Icons.delete_outline, color: cream.withOpacity(.72)),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        _productDetails(item, compact: true),
+      ],
+    );
+  }
+
+  Widget _productImage(ProductItem item, double size) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(15),
+      child: Image.network(
+        item.imageUrl,
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => Container(
+          width: size,
+          height: size,
+          color: fieldGreen,
+          child: Icon(Icons.shopping_bag, color: cream.withOpacity(.7)),
+        ),
+      ),
+    );
+  }
+
+  Widget _productDetails(ProductItem item, {bool compact = false}) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (!compact)
+          Text(
+            item.title,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: cream,
+              fontSize: 21,
+              height: 1.08,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        if (item.priceDropped)
+          _badge('⬇️ Price Dropped', lightGreen, green),
+        const SizedBox(height: 5),
+        Text(
+          item.retailer,
+          style: TextStyle(
+            color: lightGreen,
+            fontSize: compact ? 14 : 16,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 7),
+        Text(
+          'Current Price: \$${item.currentPrice}',
+          style: TextStyle(
+            color: lightGreen,
+            fontSize: compact ? 18 : 21,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        Text(
+          item.originalPriceAvailable
+              ? 'Original Price: \$${item.originalPrice}'
+              : 'Original Price: Not available',
+          style: TextStyle(
+            color: cream.withOpacity(.82),
+            fontSize: compact ? 14 : 16,
+          ),
+        ),
+        Text(
+          item.originalPriceAvailable
+              ? 'Savings: \$${item.originalPrice - item.currentPrice}'
+              : 'Savings: Tracking...',
+          style: TextStyle(
+            color: gold,
+            fontSize: compact ? 15 : 17,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 9),
+        Wrap(
+          spacing: 12,
+          runSpacing: 6,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(trendIcon(item), color: trendColor(item), size: 20),
+                const SizedBox(width: 7),
+                Text(
+                  trendLabel(item),
+                  style: TextStyle(
+                    color: trendColor(item),
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+            Text(
+              'Low: \$${lowestPrice(item)}',
+              style: TextStyle(
+                color: cream.withOpacity(.68),
+                fontSize: 13,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 9),
+        if (item.priceHistory.isNotEmpty)
+          SizedBox(
+            height: compact ? 44 : 52,
+            child: LineChart(
+              LineChartData(
+                minY: lowestPrice(item).toDouble() - 5,
+                maxY: highestPrice(item).toDouble() + 5,
+                gridData: const FlGridData(show: false),
+                titlesData: const FlTitlesData(show: false),
+                borderData: FlBorderData(show: false),
+                lineBarsData: [
+                  LineChartBarData(
+                    spots: item.priceHistory
+                        .asMap()
+                        .entries
+                        .map(
+                          (entry) => FlSpot(
+                            entry.key.toDouble(),
+                            (entry.value['price'] as int).toDouble(),
+                          ),
+                        )
+                        .toList(),
+                    isCurved: true,
+                    barWidth: 1.8,
+                    color: cream.withOpacity(.92),
+                    dotData: const FlDotData(show: false),
+                    belowBarData: BarAreaData(
+                      show: true,
+                      color: lightGreen.withOpacity(.09),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        const SizedBox(height: 7),
+        Text(
+          'Last checked: ${item.lastChecked}',
+          style: TextStyle(
+            color: cream.withOpacity(.58),
+            fontSize: 12,
+          ),
+        ),
+        Text(
+          'Source: ${item.source}',
+          style: TextStyle(
+            color: cream.withOpacity(.45),
+            fontSize: 11,
+          ),
+        ),
+      ],
     );
   }
 
@@ -1158,11 +1211,7 @@ class _HomePageState extends State<HomePage> {
       ),
       child: Text(
         text,
-        style: TextStyle(
-          color: fg,
-          fontWeight: FontWeight.bold,
-          fontSize: 12,
-        ),
+        style: TextStyle(color: fg, fontWeight: FontWeight.bold, fontSize: 12),
       ),
     );
   }
