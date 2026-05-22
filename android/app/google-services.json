@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "641515763749",
+    "project_id": "sale-scout-ff2a5",
+    "storage_bucket": "sale-scout-ff2a5.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:641515763749:android:7a0b62c6dac9c1a0ade7cc",
+        "android_client_info": {
+          "package_name": "com.example.sale_scout"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBDe0AZN8z-FkSJtGXnFUcZi2lI-PULECA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
