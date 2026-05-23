@@ -6,26 +6,32 @@ process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
 const { chromium } = require('playwright');
 
 const app = express();
+
 app.use(cors());
 
 const PORT = process.env.PORT || 3000;
 
-let isScraping = false;
+app.get('/', (req, res) => {
+  res.json({
+    status: 'ok',
+    message: 'Sale Scout API Running',
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+  });
+});
 
 app.get('/product', async (req, res) => {
   const url = req.query.url;
 
   if (!url) {
-    return res.status(400).json({ error: 'Missing product URL' });
-  }
-
-  if (isScraping) {
-    return res.status(429).json({
-      error: 'Scanner busy. Please wait a moment and try again.',
+    return res.status(400).json({
+      error: 'Missing product URL',
     });
   }
-
-  isScraping = true;
 
   try {
     const product = await scrapeNike(url);
@@ -39,14 +45,65 @@ app.get('/product', async (req, res) => {
 
     return res.json(product);
   } catch (error) {
-    console.error('SERVER ERROR:', error.message);
+    console.error('PRODUCT ERROR:', error.message);
 
     return res.status(500).json({
       error: 'Failed to fetch product',
       details: error.message,
     });
-  } finally {
-    isScraping = false;
+  }
+});
+
+app.get('/search-deals', async (req, res) => {
+  const query = req.query.q;
+
+  if (!query) {
+    return res.status(400).json({
+      error: 'Missing search query',
+    });
+  }
+
+  try {
+    const apiKey = process.env.SERPAPI_KEY;
+
+    if (!apiKey) {
+      return res.status(500).json({
+        error: 'SERPAPI_KEY missing from environment variables',
+      });
+    }
+
+    const url =
+      `https://serpapi.com/search.json` +
+      `?engine=google_shopping` +
+      `&q=${encodeURIComponent(query)}` +
+      `&api_key=${apiKey}`;
+
+    const response = await fetch(url);
+
+    const data = await response.json();
+
+    const shoppingResults = (data.shopping_results || [])
+      .slice(0, 10)
+      .map((item) => ({
+        title: item.title || '',
+        price: item.extracted_price || 0,
+        source: item.source || '',
+        link: item.link || '',
+        thumbnail: item.thumbnail || '',
+      }));
+
+    return res.json({
+      query,
+      resultCount: shoppingResults.length,
+      results: shoppingResults,
+    });
+  } catch (error) {
+    console.error('SEARCH DEALS ERROR:', error.message);
+
+    return res.status(500).json({
+      error: 'Failed to search deals',
+      details: error.message,
+    });
   }
 });
 
@@ -70,6 +127,14 @@ function cleanText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+function cleanNikeTitle(title) {
+  return cleanText(title)
+    .replace('| Nike', '')
+    .replace('| Nike.com', '')
+    .replace('. Nike.com', '')
+    .trim();
+}
+
 async function scrapeNike(url) {
   let browser;
 
@@ -85,7 +150,10 @@ async function scrapeNike(url) {
     });
 
     const page = await browser.newPage({
-      viewport: { width: 1200, height: 900 },
+      viewport: {
+        width: 1200,
+        height: 900,
+      },
       userAgent:
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
     });
@@ -112,6 +180,7 @@ async function scrapeNike(url) {
         const el =
           document.querySelector(`meta[property="${name}"]`) ||
           document.querySelector(`meta[name="${name}"]`);
+
         return el ? el.getAttribute('content') : '';
       };
 
@@ -150,8 +219,6 @@ async function scrapeNike(url) {
 
           return {
             text: (el.innerText || el.textContent || '').trim(),
-            testId: el.getAttribute('data-testid') || '',
-            top: rect.top,
             visible:
               rect.width > 0 &&
               rect.height > 0 &&
@@ -186,8 +253,11 @@ async function scrapeNike(url) {
       const uniquePrices = [...new Set(fallbackPrices)].sort((a, b) => a - b);
 
       finalCurrentPrice = uniquePrices[0] || 0;
+
       finalOriginalPrice =
-        uniquePrices.length > 1 ? uniquePrices[uniquePrices.length - 1] : null;
+        uniquePrices.length > 1
+          ? uniquePrices[uniquePrices.length - 1]
+          : null;
     }
 
     return {
@@ -202,45 +272,18 @@ async function scrapeNike(url) {
         finalOriginalPrice && finalOriginalPrice > finalCurrentPrice
       ),
       imageUrl: result.imageUrl || '',
-      source: 'nike_memory_optimized_single_scan_v1',
-      betterDeal: {
-        store: 'Scanning...',
-        price: finalCurrentPrice || 0,
-        confidence: 0,
-      },
-      debug: {
-        currentPriceText: result.currentPriceText,
-        originalPriceText: result.originalPriceText,
-        visiblePriceCandidates: result.visiblePriceCandidates.slice(0, 10),
-      },
+      source: 'nike_serpapi_phase1',
     };
   } finally {
     if (browser) {
-      await browser.close();
+      try {
+        await browser.close();
+      } catch (closeError) {
+        console.error(closeError.message);
+      }
     }
   }
 }
-
-function cleanNikeTitle(title) {
-  return cleanText(title)
-    .replace('| Nike', '')
-    .replace('| Nike.com', '')
-    .replace('. Nike.com', '')
-    .trim();
-}
-
-app.get('/', (req, res) => {
-  res.json({
-    status: 'ok',
-    message: 'Sale Scout API Running',
-  });
-});
-
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-  });
-});
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
