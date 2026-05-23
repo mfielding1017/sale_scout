@@ -356,6 +356,7 @@ class _HomePageState extends State<HomePage> {
   List<ProductItem> trackedItems = [];
   bool isLoading = false;
   bool isRefreshing = false;
+  bool apiScanInProgress = false;
   bool showDropAlert = false;
 
   String plan = 'Scout';
@@ -373,7 +374,10 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     loadUserData();
-    startMonitoring();
+
+    // Auto background scanning is intentionally paused while Nike tracking is stabilized.
+    // This prevents the app from firing refresh scans while a new item is being added.
+    // startMonitoring();
   }
 
   @override
@@ -381,6 +385,19 @@ class _HomePageState extends State<HomePage> {
     monitorTimer?.cancel();
     urlController.dispose();
     super.dispose();
+  }
+
+  void showMessage(String message) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).clearSnackBars();
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        duration: const Duration(seconds: 4),
+      ),
+    );
   }
 
   void startMonitoring() {
@@ -393,7 +410,9 @@ class _HomePageState extends State<HomePage> {
 
       if (countdown <= 0) {
         countdown = 1800;
-        refreshPrices(autoScan: true);
+
+        // Auto scan is intentionally disabled for now.
+        // refreshPrices(autoScan: true);
       }
     });
   }
@@ -411,6 +430,8 @@ class _HomePageState extends State<HomePage> {
         'trackedItems': [],
       }, SetOptions(merge: true));
 
+      if (!mounted) return;
+
       setState(() {
         trackedItems = [];
         plan = 'Scout';
@@ -427,6 +448,8 @@ class _HomePageState extends State<HomePage> {
         (item) => Map<String, dynamic>.from(item),
       ),
     );
+
+    if (!mounted) return;
 
     setState(() {
       plan = data['plan'] ?? 'Scout';
@@ -452,19 +475,60 @@ class _HomePageState extends State<HomePage> {
     try {
       final encodedUrl = Uri.encodeComponent(url);
 
-      final response = await http.get(
-        Uri.parse(
-          'https://sale-scout-api.onrender.com/product?url=$encodedUrl',
-        ),
-      );
+      final response = await http
+          .get(
+            Uri.parse(
+              'https://sale-scout-api.onrender.com/product?url=$encodedUrl',
+            ),
+          )
+          .timeout(const Duration(seconds: 120));
 
-      final data = jsonDecode(response.body);
+      if (response.statusCode != 200) {
+        print('Sale Scout API bad status: ${response.statusCode}');
+        print(response.body);
 
+        if (response.statusCode == 429) {
+          showMessage('Scanner is busy. Please wait a moment and try again.');
+        } else {
+          showMessage('Product scan failed. Please try again.');
+        }
+
+        return null;
+      }
+
+      final decoded = jsonDecode(response.body);
+
+      if (decoded is! Map<String, dynamic>) {
+        print('Sale Scout API returned invalid JSON.');
+        showMessage('Product scan returned invalid data.');
+        return null;
+      }
+
+      final data = decoded;
+
+      if (data['error'] != null) {
+        print('Sale Scout API error: ${data['error']}');
+        showMessage(data['error'].toString());
+        return null;
+      }
+
+      final title = (data['title'] ?? '').toString().trim();
+      final retailer = (data['retailer'] ?? '').toString().trim();
       final currentPriceValue = data['currentPrice'];
 
       final newPrice = currentPriceValue is num
           ? currentPriceValue.round()
-          : int.tryParse(currentPriceValue.toString()) ?? 0;
+          : int.tryParse((currentPriceValue ?? '').toString()) ?? 0;
+
+      if (title.isEmpty ||
+          title == 'Unknown Product' ||
+          retailer.isEmpty ||
+          retailer == 'Unknown' ||
+          newPrice <= 0) {
+        print('Rejected bad product response: $data');
+        showMessage('Sale Scout could not read this product yet. Try again.');
+        return null;
+      }
 
       final oldPrice = oldItem?.currentPrice;
 
@@ -480,26 +544,33 @@ class _HomePageState extends State<HomePage> {
 
       final originalAvailable = data['originalPriceAvailable'] ?? false;
       final rawOriginal = data['originalPrice'];
+      final betterDeal = data['betterDeal'];
 
       return ProductItem(
         url: url,
-        title: data['title'] ?? 'Unknown Product',
-        retailer: data['retailer'] ?? 'Unknown',
+        title: title,
+        retailer: retailer,
         currentPrice: newPrice,
-        originalPrice: rawOriginal == null ? 0 : (rawOriginal as num).round(),
-        originalPriceAvailable: originalAvailable,
+        originalPrice: rawOriginal is num ? rawOriginal.round() : 0,
+        originalPriceAvailable: originalAvailable == true,
         imageUrl: data['imageUrl'] ?? '',
-        betterDealPrice:
-            ((data['betterDeal']?['price'] ?? newPrice) as num).round(),
-        betterDealStore: data['betterDeal']?['store'] ?? 'Unknown',
-        confidence: ((data['betterDeal']?['confidence'] ?? 0) as num).round(),
+        betterDealPrice: betterDeal is Map && betterDeal['price'] is num
+            ? (betterDeal['price'] as num).round()
+            : newPrice,
+        betterDealStore: betterDeal is Map
+            ? (betterDeal['store'] ?? 'Unknown').toString()
+            : 'Unknown',
+        confidence: betterDeal is Map && betterDeal['confidence'] is num
+            ? (betterDeal['confidence'] as num).round()
+            : 0,
         lastChecked: DateTime.now().toLocal().toString().substring(0, 16),
-        priceDropped: oldPrice != null && newPrice < oldPrice,
+        priceDropped: oldPrice != null && newPrice > 0 && newPrice < oldPrice,
         source: data['source'] ?? 'unknown',
         priceHistory: history,
       );
     } catch (e) {
       print(e);
+      showMessage('Product scan timed out or failed. Please try again.');
       return null;
     }
   }
@@ -514,72 +585,64 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> fetchProduct() async {
+    if (apiScanInProgress || isLoading || isRefreshing) {
+      showMessage('A scan is already running. Please wait.');
+      return;
+    }
+
     final url = urlController.text.trim();
 
     if (url.isEmpty) return;
+
+    final alreadyTracked = trackedItems.any((item) => item.url == url);
+
+    if (alreadyTracked) {
+      showMessage('This item is already being tracked.');
+      return;
+    }
 
     if (trackedItems.length >= itemLimit) {
       showLimitDialog();
       return;
     }
 
+    if (!mounted) return;
+
     setState(() {
       isLoading = true;
+      apiScanInProgress = true;
     });
 
-    final item = await getProductFromApi(url);
+    try {
+      final item = await getProductFromApi(url);
 
-    if (item != null) {
+      if (item != null) {
+        if (!mounted) return;
+
+        setState(() {
+          trackedItems.insert(0, item);
+          urlController.clear();
+        });
+
+        await saveUserData();
+
+        showMessage('Item added successfully.');
+      }
+    } finally {
+      if (!mounted) return;
+
       setState(() {
-        trackedItems.insert(0, item);
-        urlController.clear();
+        isLoading = false;
+        apiScanInProgress = false;
       });
-
-      await saveUserData();
     }
-
-    setState(() {
-      isLoading = false;
-    });
   }
 
   Future<void> refreshPrices({bool autoScan = false}) async {
-    if (trackedItems.isEmpty) return;
-
-    setState(() {
-      isRefreshing = true;
-    });
-
-    final updatedItems = <ProductItem>[];
-    bool anyDrop = false;
-
-    for (final item in trackedItems) {
-      final updated = await getProductFromApi(item.url, oldItem: item);
-
-      if (updated != null && updated.priceDropped) {
-        anyDrop = true;
-      }
-
-      updatedItems.add(updated ?? item);
-    }
-
-    setState(() {
-      trackedItems = updatedItems;
-      isRefreshing = false;
-      showDropAlert = anyDrop;
-    });
-
-    await saveUserData();
-
-    if (anyDrop) {
-      Future.delayed(const Duration(seconds: 5), () {
-        if (mounted) {
-          setState(() {
-            showDropAlert = false;
-          });
-        }
-      });
-    }
+    // Manual and automatic refresh are temporarily disabled while Nike tracking is stabilized.
+    // This prevents saved tracked items from firing extra backend requests while a new item is being added.
+    showMessage('Scan Now is paused while Nike tracking is being stabilized.');
+    return;
   }
 
   Future<void> removeItem(int index) async {
@@ -740,7 +803,11 @@ class _HomePageState extends State<HomePage> {
                 runSpacing: 8,
                 children: [
                   _pill('🎖 $plan Plan', lightGreen, green),
-                  _pill('Watching ${trackedItems.length}/$itemLimit', cream, green),
+                  _pill(
+                    'Watching ${trackedItems.length}/$itemLimit',
+                    cream,
+                    green,
+                  ),
                 ],
               ),
               SizedBox(height: isPhone ? 8 : 10),
@@ -760,7 +827,9 @@ class _HomePageState extends State<HomePage> {
                       border: Border.all(color: lightGreen.withOpacity(.42)),
                     ),
                     child: Text(
-                      '🟢 Monitoring Active',
+                      apiScanInProgress
+                          ? '🟡 Scan Running'
+                          : '🟢 Monitoring Active',
                       style: TextStyle(
                         color: lightGreen,
                         fontWeight: FontWeight.bold,
@@ -769,7 +838,7 @@ class _HomePageState extends State<HomePage> {
                     ),
                   ),
                   Text(
-                    'Next scan in: ${countdown}s',
+                    'Auto scan paused',
                     style: TextStyle(
                       color: cream.withOpacity(.68),
                       fontSize: isPhone ? 12 : 14,
@@ -811,7 +880,7 @@ class _HomePageState extends State<HomePage> {
                     horizontal: 14,
                     vertical: isPhone ? 12 : 16,
                   ),
-                  enabled: remaining > 0,
+                  enabled: remaining > 0 && !apiScanInProgress,
                   enabledBorder: OutlineInputBorder(
                     borderSide: BorderSide(color: cream.withOpacity(.28)),
                     borderRadius: BorderRadius.circular(18),
@@ -831,7 +900,9 @@ class _HomePageState extends State<HomePage> {
                 width: double.infinity,
                 height: isPhone ? 48 : 56,
                 child: ElevatedButton.icon(
-                  onPressed: isLoading ? null : fetchProduct,
+                  onPressed: (isLoading || isRefreshing || apiScanInProgress)
+                      ? null
+                      : fetchProduct,
                   icon: isLoading
                       ? const SizedBox(
                           width: 18,
@@ -840,8 +911,8 @@ class _HomePageState extends State<HomePage> {
                         )
                       : const Icon(Icons.travel_explore),
                   label: Text(
-                    isLoading
-                        ? 'Scouting... up to 60 sec'
+                    isLoading || apiScanInProgress
+                        ? 'Scouting... please wait'
                         : (remaining > 0 ? 'Track Item' : 'Upgrade Tracking'),
                     textAlign: TextAlign.center,
                     style: TextStyle(
@@ -864,10 +935,10 @@ class _HomePageState extends State<HomePage> {
                 width: double.infinity,
                 height: isPhone ? 44 : 50,
                 child: OutlinedButton.icon(
-                  onPressed: isRefreshing ? null : () => refreshPrices(),
+                  onPressed: null,
                   icon: const Icon(Icons.refresh),
                   label: Text(
-                    isRefreshing ? 'Scanning Prices...' : 'Scan Now',
+                    'Scan Now paused',
                     style: TextStyle(fontSize: isPhone ? 14 : 16),
                   ),
                   style: OutlinedButton.styleFrom(
