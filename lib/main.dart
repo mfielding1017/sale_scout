@@ -362,7 +362,7 @@ class _HomePageState extends State<HomePage> {
   int itemLimit = 5;
 
   Timer? monitorTimer;
-  int countdown = 30;
+  int countdown = 1800;
 
   String get uid => FirebaseAuth.instance.currentUser!.uid;
 
@@ -392,7 +392,7 @@ class _HomePageState extends State<HomePage> {
       });
 
       if (countdown <= 0) {
-        countdown = 30;
+        countdown = 1800;
         refreshPrices(autoScan: true);
       }
     });
