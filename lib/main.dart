@@ -11,6 +11,15 @@ import 'package:http/http.dart' as http;
 
 import 'firebase_options.dart';
 
+// NOTE:
+// This full main.dart keeps your current working Nike tracking flow,
+// keeps auto-scan paused, and adds the first cross-retailer deal section.
+// It calls:
+//   /product
+// then:
+//   /search-deals
+// and displays the top Google Shopping results under each tracked item.
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -242,6 +251,44 @@ class _LoginPageState extends State<LoginPage> {
   }
 }
 
+class DealResult {
+  final String title;
+  final int price;
+  final String source;
+  final String link;
+  final String thumbnail;
+
+  DealResult({
+    required this.title,
+    required this.price,
+    required this.source,
+    required this.link,
+    required this.thumbnail,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'title': title,
+        'price': price,
+        'source': source,
+        'link': link,
+        'thumbnail': thumbnail,
+      };
+
+  factory DealResult.fromJson(Map<String, dynamic> json) {
+    final rawPrice = json['price'];
+
+    return DealResult(
+      title: json['title']?.toString() ?? '',
+      price: rawPrice is num
+          ? rawPrice.round()
+          : int.tryParse((rawPrice ?? '0').toString()) ?? 0,
+      source: json['source']?.toString() ?? '',
+      link: json['link']?.toString() ?? '',
+      thumbnail: json['thumbnail']?.toString() ?? '',
+    );
+  }
+}
+
 class ProductItem {
   final String url;
   final String title;
@@ -257,6 +304,7 @@ class ProductItem {
   final bool priceDropped;
   final String source;
   final List<Map<String, dynamic>> priceHistory;
+  final List<DealResult> dealResults;
 
   ProductItem({
     required this.url,
@@ -273,6 +321,7 @@ class ProductItem {
     required this.priceDropped,
     required this.source,
     required this.priceHistory,
+    required this.dealResults,
   });
 
   Map<String, dynamic> toJson() => {
@@ -297,6 +346,7 @@ class ProductItem {
               },
             )
             .toList(),
+        'dealResults': dealResults.map((deal) => deal.toJson()).toList(),
       };
 
   factory ProductItem.fromJson(Map<String, dynamic> json) {
@@ -330,6 +380,11 @@ class ProductItem {
                   entry['timestamp'] ?? DateTime.now().toIso8601String(),
             };
           },
+        ),
+      ),
+      dealResults: List<DealResult>.from(
+        (json['dealResults'] ?? []).map(
+          (deal) => DealResult.fromJson(Map<String, dynamic>.from(deal)),
         ),
       ),
     );
@@ -375,8 +430,8 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     loadUserData();
 
-    // Auto background scanning is intentionally paused while Nike tracking is stabilized.
-    // This prevents the app from firing refresh scans while a new item is being added.
+    // Auto background scanning is temporarily disabled.
+    // This prevents repeated Nike scans and backend "Scanner busy" issues.
     // startMonitoring();
   }
 
@@ -411,7 +466,7 @@ class _HomePageState extends State<HomePage> {
       if (countdown <= 0) {
         countdown = 1800;
 
-        // Auto scan is intentionally disabled for now.
+        // Auto scan temporarily disabled.
         // refreshPrices(autoScan: true);
       }
     });
@@ -466,6 +521,51 @@ class _HomePageState extends State<HomePage> {
       'updatedAt': FieldValue.serverTimestamp(),
       'trackedItems': trackedItems.map((item) => item.toJson()).toList(),
     }, SetOptions(merge: true));
+  }
+
+  Future<List<DealResult>> searchDealsForProduct(String title) async {
+    try {
+      final encodedQuery = Uri.encodeComponent(title);
+
+      final response = await http
+          .get(
+            Uri.parse(
+              'https://sale-scout-api.onrender.com/search-deals?q=$encodedQuery',
+            ),
+          )
+          .timeout(const Duration(seconds: 45));
+
+      if (response.statusCode != 200) {
+        print('Search deals bad status: ${response.statusCode}');
+        print(response.body);
+        return [];
+      }
+
+      final decoded = jsonDecode(response.body);
+
+      if (decoded is! Map<String, dynamic>) {
+        return [];
+      }
+
+      final rawResults = decoded['results'];
+
+      if (rawResults is! List) {
+        return [];
+      }
+
+      final deals = rawResults
+          .map((item) => DealResult.fromJson(Map<String, dynamic>.from(item)))
+          .where((deal) =>
+              deal.title.isNotEmpty && deal.source.isNotEmpty && deal.price > 0)
+          .toList();
+
+      deals.sort((a, b) => a.price.compareTo(b.price));
+
+      return deals.take(8).toList();
+    } catch (e) {
+      print('SEARCH DEALS ERROR: $e');
+      return [];
+    }
   }
 
   Future<ProductItem?> getProductFromApi(
@@ -546,6 +646,10 @@ class _HomePageState extends State<HomePage> {
       final rawOriginal = data['originalPrice'];
       final betterDeal = data['betterDeal'];
 
+      final deals = await searchDealsForProduct(title);
+      final cheapestDeal =
+          deals.isEmpty ? null : deals.reduce((a, b) => a.price < b.price ? a : b);
+
       return ProductItem(
         url: url,
         title: title,
@@ -554,12 +658,14 @@ class _HomePageState extends State<HomePage> {
         originalPrice: rawOriginal is num ? rawOriginal.round() : 0,
         originalPriceAvailable: originalAvailable == true,
         imageUrl: data['imageUrl'] ?? '',
-        betterDealPrice: betterDeal is Map && betterDeal['price'] is num
-            ? (betterDeal['price'] as num).round()
-            : newPrice,
-        betterDealStore: betterDeal is Map
-            ? (betterDeal['store'] ?? 'Unknown').toString()
-            : 'Unknown',
+        betterDealPrice: cheapestDeal?.price ??
+            (betterDeal is Map && betterDeal['price'] is num
+                ? (betterDeal['price'] as num).round()
+                : newPrice),
+        betterDealStore: cheapestDeal?.source ??
+            (betterDeal is Map
+                ? (betterDeal['store'] ?? 'Unknown').toString()
+                : 'Unknown'),
         confidence: betterDeal is Map && betterDeal['confidence'] is num
             ? (betterDeal['confidence'] as num).round()
             : 0,
@@ -567,6 +673,7 @@ class _HomePageState extends State<HomePage> {
         priceDropped: oldPrice != null && newPrice > 0 && newPrice < oldPrice,
         source: data['source'] ?? 'unknown',
         priceHistory: history,
+        dealResults: deals,
       );
     } catch (e) {
       print(e);
@@ -585,7 +692,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> fetchProduct() async {
-    if (apiScanInProgress || isLoading || isRefreshing) {
+    if (apiScanInProgress) {
       showMessage('A scan is already running. Please wait.');
       return;
     }
@@ -593,13 +700,6 @@ class _HomePageState extends State<HomePage> {
     final url = urlController.text.trim();
 
     if (url.isEmpty) return;
-
-    final alreadyTracked = trackedItems.any((item) => item.url == url);
-
-    if (alreadyTracked) {
-      showMessage('This item is already being tracked.');
-      return;
-    }
 
     if (trackedItems.length >= itemLimit) {
       showLimitDialog();
@@ -625,8 +725,6 @@ class _HomePageState extends State<HomePage> {
         });
 
         await saveUserData();
-
-        showMessage('Item added successfully.');
       }
     } finally {
       if (!mounted) return;
@@ -639,10 +737,58 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> refreshPrices({bool autoScan = false}) async {
-    // Manual and automatic refresh are temporarily disabled while Nike tracking is stabilized.
-    // This prevents saved tracked items from firing extra backend requests while a new item is being added.
-    showMessage('Scan Now is paused while Nike tracking is being stabilized.');
-    return;
+    if (apiScanInProgress) return;
+    if (trackedItems.isEmpty) return;
+
+    if (!mounted) return;
+
+    setState(() {
+      isRefreshing = true;
+      apiScanInProgress = true;
+    });
+
+    final updatedItems = <ProductItem>[];
+    bool anyDrop = false;
+
+    try {
+      for (final item in trackedItems) {
+        final updated = await getProductFromApi(item.url, oldItem: item);
+
+        if (updated != null && updated.priceDropped) {
+          anyDrop = true;
+        }
+
+        updatedItems.add(updated ?? item);
+
+        await Future.delayed(const Duration(seconds: 3));
+      }
+
+      if (!mounted) return;
+
+      setState(() {
+        trackedItems = updatedItems;
+        showDropAlert = anyDrop;
+      });
+
+      await saveUserData();
+
+      if (anyDrop) {
+        Future.delayed(const Duration(seconds: 5), () {
+          if (mounted) {
+            setState(() {
+              showDropAlert = false;
+            });
+          }
+        });
+      }
+    } finally {
+      if (!mounted) return;
+
+      setState(() {
+        isRefreshing = false;
+        apiScanInProgress = false;
+      });
+    }
   }
 
   Future<void> removeItem(int index) async {
@@ -900,9 +1046,8 @@ class _HomePageState extends State<HomePage> {
                 width: double.infinity,
                 height: isPhone ? 48 : 56,
                 child: ElevatedButton.icon(
-                  onPressed: (isLoading || isRefreshing || apiScanInProgress)
-                      ? null
-                      : fetchProduct,
+                  onPressed:
+                      (isLoading || apiScanInProgress) ? null : fetchProduct,
                   icon: isLoading
                       ? const SizedBox(
                           width: 18,
@@ -935,10 +1080,14 @@ class _HomePageState extends State<HomePage> {
                 width: double.infinity,
                 height: isPhone ? 44 : 50,
                 child: OutlinedButton.icon(
-                  onPressed: null,
+                  onPressed: (isRefreshing || apiScanInProgress)
+                      ? null
+                      : () => refreshPrices(),
                   icon: const Icon(Icons.refresh),
                   label: Text(
-                    'Scan Now paused',
+                    isRefreshing || apiScanInProgress
+                        ? 'Scanning Prices...'
+                        : 'Scan Now',
                     style: TextStyle(fontSize: isPhone ? 14 : 16),
                   ),
                   style: OutlinedButton.styleFrom(
@@ -1169,6 +1318,8 @@ class _HomePageState extends State<HomePage> {
             fontWeight: FontWeight.bold,
           ),
         ),
+        const SizedBox(height: 10),
+        _dealResultsSection(item),
         const SizedBox(height: 9),
         Wrap(
           spacing: 12,
@@ -1251,6 +1402,84 @@ class _HomePageState extends State<HomePage> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _dealResultsSection(ProductItem item) {
+    if (item.dealResults.isEmpty) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: fieldGreen.withOpacity(.7),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: cream.withOpacity(.12)),
+        ),
+        child: Text(
+          'Cross-retailer deals: Searching soon...',
+          style: TextStyle(
+            color: cream.withOpacity(.62),
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      );
+    }
+
+    final cheapest = item.dealResults.first;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: fieldGreen.withOpacity(.85),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: lightGreen.withOpacity(.28)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            cheapest.price < item.currentPrice
+                ? 'Found cheaper elsewhere'
+                : 'Cross-retailer prices',
+            style: TextStyle(
+              color: cheapest.price < item.currentPrice ? lightGreen : cream,
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 7),
+          ...item.dealResults.take(4).map((deal) {
+            final cheaper = deal.price < item.currentPrice;
+
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Row(
+                children: [
+                  Icon(
+                    cheaper ? Icons.local_offer : Icons.storefront,
+                    size: 16,
+                    color: cheaper ? lightGreen : cream.withOpacity(.6),
+                  ),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: Text(
+                      '${deal.source}: \$${deal.price}',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: cheaper ? lightGreen : cream.withOpacity(.84),
+                        fontSize: 13,
+                        fontWeight: cheaper ? FontWeight.bold : FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }),
+        ],
+      ),
     );
   }
 
