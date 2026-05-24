@@ -21,13 +21,29 @@ app.get('/health', (req, res) => {
 app.get('/product', async (req, res) => {
   const url = req.query.url;
 
-  if (!url) return res.status(400).json({ error: 'Missing product URL' });
+  if (!url) {
+    return res.status(400).json({
+      error: 'Missing product URL',
+    });
+  }
 
   try {
-    const product = await scrapeNike(url);
+    let product;
+
+    if (url.includes('target.com')) {
+      product = await scrapeTarget(url);
+    } else if (url.includes('nike.com')) {
+      product = await scrapeNike(url);
+    } else {
+      return res.status(400).json({
+        error: 'Unsupported retailer',
+      });
+    }
+
     return res.json(product);
   } catch (error) {
     console.error('PRODUCT ERROR:', error.message);
+
     return res.status(500).json({
       error: 'Failed to fetch product',
       details: error.message,
@@ -38,7 +54,11 @@ app.get('/product', async (req, res) => {
 app.get('/search-deals', async (req, res) => {
   const q = req.query.q;
 
-  if (!q) return res.status(400).json({ error: 'Missing search query' });
+  if (!q) {
+    return res.status(400).json({
+      error: 'Missing search query',
+    });
+  }
 
   try {
     const apiKey = process.env.SERPAPI_KEY;
@@ -64,6 +84,7 @@ app.get('/search-deals', async (req, res) => {
     for (const item of rawResults) {
       const title = item.title || '';
       const rawSource = item.source || 'Unknown';
+
       const sourceKey = normalizeRetailerSource(rawSource);
       const displaySource = cleanRetailerDisplayName(rawSource);
 
@@ -73,10 +94,14 @@ app.get('/search-deals', async (req, res) => {
           : typeof item.price === 'number'
             ? item.price
             : parseFloat(
-                String(item.price || '').replace('$', '').replace(',', '')
+                String(item.price || '')
+                  .replace('$', '')
+                  .replace(',', '')
               );
 
-      if (!title || !displaySource || !sourceKey || !extractedPrice) continue;
+      if (!title || !displaySource || !sourceKey || !extractedPrice) {
+        continue;
+      }
 
       const confidence = smartMatchConfidence(
         q,
@@ -206,11 +231,12 @@ app.get('/search-deals', async (req, res) => {
     return res.json({
       query: q,
       resultCount: results.length,
-      source: 'serpapi_verification_signals_v6_links',
+      source: 'target_support_v1',
       results,
     });
   } catch (error) {
     console.error('SEARCH DEALS ERROR:', error.message);
+
     return res.status(500).json({
       error: 'Failed to search deals',
       details: error.message,
@@ -226,10 +252,15 @@ function normalizeRetailerSource(source) {
     .trim();
 
   if (cleaned.includes('nike')) return 'nike';
+  if (cleaned.includes('target')) return 'target';
+  if (cleaned.includes('walmart')) return 'walmart';
+  if (cleaned.includes('costco')) return 'costco';
   if (cleaned.includes('finishline')) return 'finishline';
+
   if (cleaned.includes('dicks') || cleaned.includes('dickssportinggoods')) {
     return 'dickssportinggoods';
   }
+
   if (cleaned.includes('jdsports')) return 'jdsports';
   if (cleaned.includes('snipes')) return 'snipes';
   if (cleaned.includes('goat')) return 'goat';
@@ -242,12 +273,14 @@ function normalizeRetailerSource(source) {
 
   return cleaned;
 }
-
 function cleanRetailerDisplayName(source) {
   const key = normalizeRetailerSource(source);
 
   const displayNames = {
     nike: 'Nike',
+    target: 'Target',
+    walmart: 'Walmart',
+    costco: 'Costco',
     finishline: 'Finish Line',
     dickssportinggoods: "Dick's Sporting Goods",
     jdsports: 'JD Sports',
@@ -266,9 +299,12 @@ function cleanRetailerDisplayName(source) {
 
 function extractSkuFromText(text) {
   const value = String(text || '').toUpperCase();
+
   const matches = value.match(/\b[A-Z0-9]{6}-[0-9]{3}\b/g);
 
-  if (!matches || matches.length === 0) return null;
+  if (!matches || matches.length === 0) {
+    return null;
+  }
 
   return matches.find((m) => !m.startsWith('HTTP')) || matches[0];
 }
@@ -283,8 +319,16 @@ function smartMatchConfidence(query, title, source, price) {
 
   let score = 0;
 
-  if (querySku && titleSku && querySku === titleSku) score += 55;
-  if (querySku && titleText.includes(querySku.toLowerCase())) score += 45;
+  if (querySku && titleSku && querySku === titleSku) {
+    score += 55;
+  }
+
+  if (
+    querySku &&
+    titleText.includes(querySku.toLowerCase())
+  ) {
+    score += 45;
+  }
 
   const importantWords = queryText
     .replace(/[^a-z0-9\s-]/g, '')
@@ -292,52 +336,114 @@ function smartMatchConfidence(query, title, source, price) {
     .filter((word) => word.length > 2)
     .filter(
       (word) =>
-        !['mens', 'womens', 'men', 'women', 'shoes', 'shoe', 'nike'].includes(
-          word
-        )
+        ![
+          'mens',
+          'womens',
+          'men',
+          'women',
+          'shoes',
+          'shoe',
+          'nike',
+          'target',
+          'walmart',
+          'costco',
+        ].includes(word)
     );
 
   let matchedWords = 0;
 
   for (const word of importantWords) {
-    if (titleText.includes(word)) matchedWords++;
+    if (titleText.includes(word)) {
+      matchedWords++;
+    }
   }
 
   if (importantWords.length > 0) {
-    score += Math.round((matchedWords / importantWords.length) * 35);
+    score += Math.round(
+      (matchedWords / importantWords.length) * 45
+    );
   }
 
-  if (queryText.includes('nike') && titleText.includes('nike')) score += 10;
-  if (queryText.includes('air max') && titleText.includes('air max')) score += 10;
-  if (queryText.includes('dunk') && titleText.includes('dunk')) score += 10;
-  if (queryText.includes('force') && titleText.includes('force')) score += 10;
+  if (
+    queryText.includes('nike') &&
+    titleText.includes('nike')
+  ) {
+    score += 10;
+  }
 
+  if (
+    queryText.includes('target') &&
+    sourceText.includes('target')
+  ) {
+    score += 10;
+  }
+
+  if (
+    queryText.includes('walmart') &&
+    sourceText.includes('walmart')
+  ) {
+    score += 10;
+  }
+
+  if (
+    queryText.includes('costco') &&
+    sourceText.includes('costco')
+  ) {
+    score += 10;
+  }
+
+  if (
+    queryText.includes('air max') &&
+    titleText.includes('air max')
+  ) {
+    score += 10;
+  }
+
+  if (
+    queryText.includes('dunk') &&
+    titleText.includes('dunk')
+  ) {
+    score += 10;
+  }
+
+  if (
+    queryText.includes('force') &&
+    titleText.includes('force')
+  ) {
+    score += 10;
+  }
+
+  if (sourceText.includes('target')) score += 8;
+  if (sourceText.includes('walmart')) score += 8;
+  if (sourceText.includes('costco')) score += 8;
   if (sourceText.includes('nike')) score += 8;
-  if (sourceText.includes('finish')) score += 5;
-  if (sourceText.includes('dick')) score += 5;
-  if (sourceText.includes('goat') || sourceText.includes('stockx')) score += 3;
 
   if (
     titleText.includes('kids') ||
     titleText.includes('baby') ||
     titleText.includes('toddler')
   ) {
-    score -= 25;
+    score -= 15;
   }
 
-  if (titleText.includes('youth') || titleText.includes('grade school')) {
+  if (
+    titleText.includes('used') ||
+    titleText.includes('pre-owned')
+  ) {
     score -= 18;
   }
 
-  if (titleText.includes('women') && queryText.includes('men')) {
-    score -= 18;
+  if (
+    titleText.includes('refurbished') ||
+    titleText.includes('renewed') ||
+    titleText.includes('open box')
+  ) {
+    score -= 20;
   }
 
-  if (titleText.includes('used') || titleText.includes('pre-owned')) {
-    score -= 12;
+  if (price < 2) {
+    score -= 20;
   }
-
-  if (price < 20) score -= 20;
 
   return Math.max(0, Math.min(100, score));
 }
@@ -353,13 +459,17 @@ function cleanPrice(value) {
 
   const price = Math.round(Number(match[1]));
 
-  if (!price || price < 5 || price > 1000) return null;
+  if (!price || price < 1 || price > 5000) {
+    return null;
+  }
 
   return price;
 }
 
 function cleanText(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim();
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function cleanNikeTitle(title) {
@@ -385,7 +495,11 @@ async function scrapeNike(url) {
     });
 
     const page = await browser.newPage({
-      viewport: { width: 1200, height: 900 },
+      viewport: {
+        width: 1200,
+        height: 900,
+      },
+
       userAgent:
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
     });
@@ -393,7 +507,9 @@ async function scrapeNike(url) {
     await page.route('**/*', (route) => {
       const type = route.request().resourceType();
 
-      if (['image', 'font', 'media'].includes(type)) {
+      if (
+        ['image', 'font', 'media'].includes(type)
+      ) {
         route.abort();
       } else {
         route.continue();
@@ -410,62 +526,104 @@ async function scrapeNike(url) {
     const result = await page.evaluate(() => {
       const getMeta = (name) => {
         const el =
-          document.querySelector(`meta[property="${name}"]`) ||
-          document.querySelector(`meta[name="${name}"]`);
+          document.querySelector(
+            `meta[property="${name}"]`
+          ) ||
+          document.querySelector(
+            `meta[name="${name}"]`
+          );
 
-        return el ? el.getAttribute('content') : '';
+        return el
+          ? el.getAttribute('content')
+          : '';
       };
 
       const title =
         getMeta('og:title') ||
-        document.querySelector('h1')?.innerText ||
+        document.querySelector('h1')
+          ?.innerText ||
         document.title ||
         'Nike Product';
 
-      const imageUrl = getMeta('og:image') || getMeta('twitter:image') || '';
+      const imageUrl =
+        getMeta('og:image') ||
+        getMeta('twitter:image') ||
+        '';
 
       const currentPriceEl =
-        document.querySelector('[data-testid="currentPrice-container"]') ||
-        document.querySelector('[data-test="currentPrice-container"]');
+        document.querySelector(
+          '[data-testid="currentPrice-container"]'
+        ) ||
+        document.querySelector(
+          '[data-test="currentPrice-container"]'
+        );
 
       const originalPriceEl =
-        document.querySelector('[data-testid="initialPrice-container"]') ||
-        document.querySelector('[data-test="initialPrice-container"]');
+        document.querySelector(
+          '[data-testid="initialPrice-container"]'
+        ) ||
+        document.querySelector(
+          '[data-test="initialPrice-container"]'
+        );
 
-      const currentPriceText = currentPriceEl
-        ? currentPriceEl.innerText || currentPriceEl.textContent || ''
-        : '';
+      const currentPriceText =
+        currentPriceEl
+          ? currentPriceEl.innerText ||
+            currentPriceEl.textContent ||
+            ''
+          : '';
 
-      const originalPriceText = originalPriceEl
-        ? originalPriceEl.innerText || originalPriceEl.textContent || ''
-        : '';
+      const originalPriceText =
+        originalPriceEl
+          ? originalPriceEl.innerText ||
+            originalPriceEl.textContent ||
+            ''
+          : '';
 
-      const visiblePriceCandidates = Array.from(
-        document.querySelectorAll('body *')
-      )
-        .map((el) => {
-          const rect = el.getBoundingClientRect();
+      const visiblePriceCandidates =
+        Array.from(
+          document.querySelectorAll('body *')
+        )
+          .map((el) => {
+            const rect =
+              el.getBoundingClientRect();
 
-          return {
-            text: (el.innerText || el.textContent || '').trim(),
-            visible:
-              rect.width > 0 &&
-              rect.height > 0 &&
-              rect.top >= 0 &&
-              rect.top < 900,
-          };
-        })
-        .filter((item) => item.visible)
-        .filter((item) => item.text.includes('$'))
-        .filter((item) => item.text.length <= 100);
+            return {
+              text:
+                (
+                  el.innerText ||
+                  el.textContent ||
+                  ''
+                ).trim(),
+
+              visible:
+                rect.width > 0 &&
+                rect.height > 0 &&
+                rect.top >= 0 &&
+                rect.top < 900,
+            };
+          })
+          .filter((item) => item.visible)
+          .filter((item) =>
+            item.text.includes('$')
+          )
+          .filter(
+            (item) => item.text.length <= 100
+          );
 
       const pageText = `${
         document.body.innerText || ''
-      } ${document.documentElement.innerHTML || ''}`.toUpperCase();
+      } ${
+        document.documentElement.innerHTML || ''
+      }`.toUpperCase();
 
       const skuMatch =
-        pageText.match(/\b[A-Z0-9]{6}-[0-9]{3}\b/) ||
-        pageText.match(/\b[A-Z]{2}[0-9]{4}-[0-9]{3}\b/);
+        pageText.match(
+          /\b[A-Z0-9]{6}-[0-9]{3}\b/
+        ) ||
+        pageText.match(
+          /\b[A-Z]{2}[0-9]{4}-[0-9]{3}\b/
+        );
 
       return {
         title,
@@ -477,39 +635,69 @@ async function scrapeNike(url) {
       };
     });
 
-    const currentPrice = cleanPrice(result.currentPriceText);
-    const originalPrice = cleanPrice(result.originalPriceText);
+    const currentPrice = cleanPrice(
+      result.currentPriceText
+    );
+
+    const originalPrice = cleanPrice(
+      result.originalPriceText
+    );
 
     let finalCurrentPrice = currentPrice;
     let finalOriginalPrice = originalPrice;
 
     if (!finalCurrentPrice) {
-      const fallbackPrices = result.visiblePriceCandidates
-        .map((item) => cleanPrice(item.text))
-        .filter((price) => price !== null);
+      const fallbackPrices =
+        result.visiblePriceCandidates
+          .map((item) =>
+            cleanPrice(item.text)
+          )
+          .filter(
+            (price) => price !== null
+          );
 
-      const uniquePrices = [...new Set(fallbackPrices)].sort((a, b) => a - b);
+      const uniquePrices = [
+        ...new Set(fallbackPrices),
+      ].sort((a, b) => a - b);
 
-      finalCurrentPrice = uniquePrices[0] || 0;
+      finalCurrentPrice =
+        uniquePrices[0] || 0;
+
       finalOriginalPrice =
-        uniquePrices.length > 1 ? uniquePrices[uniquePrices.length - 1] : null;
+        uniquePrices.length > 1
+          ? uniquePrices[
+              uniquePrices.length - 1
+            ]
+          : null;
     }
 
-    const finalSku = result.sku || extractSkuFromText(url);
+    const finalSku =
+      result.sku ||
+      extractSkuFromText(url);
 
     return {
       title: cleanNikeTitle(result.title),
       sku: finalSku,
       retailer: 'Nike',
-      currentPrice: finalCurrentPrice || 0,
+      currentPrice:
+        finalCurrentPrice || 0,
+
       originalPrice:
-        finalOriginalPrice && finalOriginalPrice > finalCurrentPrice
+        finalOriginalPrice &&
+        finalOriginalPrice >
+          finalCurrentPrice
           ? finalOriginalPrice
           : null,
-      originalPriceAvailable: Boolean(
-        finalOriginalPrice && finalOriginalPrice > finalCurrentPrice
-      ),
+
+      originalPriceAvailable:
+        Boolean(
+          finalOriginalPrice &&
+            finalOriginalPrice >
+              finalCurrentPrice
+        ),
+
       imageUrl: result.imageUrl || '',
+
       source: 'nike_sku_detection_v1',
     };
   } finally {
@@ -517,12 +705,239 @@ async function scrapeNike(url) {
       try {
         await browser.close();
       } catch (closeError) {
-        console.error('Browser close failed:', closeError.message);
+        console.error(
+          'Browser close failed:',
+          closeError.message
+        );
+      }
+    }
+  }
+}
+
+async function scrapeTarget(url) {
+  let browser;
+
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+      ],
+    });
+
+    const page = await browser.newPage({
+      viewport: {
+        width: 1200,
+        height: 900,
+      },
+
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+    });
+
+    await page.route('**/*', (route) => {
+      const type = route.request().resourceType();
+
+      if (
+        ['image', 'font', 'media'].includes(type)
+      ) {
+        route.abort();
+      } else {
+        route.continue();
+      }
+    });
+
+    await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: 90000,
+    });
+
+    await page.waitForTimeout(5000);
+
+    const result = await page.evaluate(() => {
+      const getMeta = (name) => {
+        const el =
+          document.querySelector(
+            `meta[property="${name}"]`
+          ) ||
+          document.querySelector(
+            `meta[name="${name}"]`
+          );
+
+        return el
+          ? el.getAttribute('content')
+          : '';
+      };
+
+      const title =
+        getMeta('og:title') ||
+        document.querySelector('h1')
+          ?.innerText ||
+        document.title ||
+        'Target Product';
+
+      const imageUrl =
+        getMeta('og:image') ||
+        getMeta('twitter:image') ||
+        document.querySelector('img')
+          ?.src ||
+        '';
+
+      const visiblePriceCandidates =
+        Array.from(
+          document.querySelectorAll('body *')
+        )
+          .map((el) => {
+            const rect =
+              el.getBoundingClientRect();
+
+            return {
+              text:
+                (
+                  el.innerText ||
+                  el.textContent ||
+                  ''
+                ).trim(),
+
+              visible:
+                rect.width > 0 &&
+                rect.height > 0 &&
+                rect.top >= 0 &&
+                rect.top < 900,
+            };
+          })
+          .filter((item) => item.visible)
+          .filter((item) =>
+            item.text.includes('$')
+          )
+          .filter(
+            (item) => item.text.length <= 120
+          );
+
+      const priceCandidates =
+        visiblePriceCandidates
+          .map((item) => {
+            const match = String(
+              item.text || ''
+            )
+              .replace(/,/g, '')
+              .match(
+                /\$?\s?([0-9]+(?:\.[0-9]{1,2})?)/
+              );
+
+            return match
+              ? Number(match[1])
+              : null;
+          })
+          .filter(
+            (price) =>
+              price &&
+              price >= 1 &&
+              price <= 5000
+          );
+
+      const uniquePrices = [
+        ...new Set(priceCandidates),
+      ].sort((a, b) => a - b);
+
+      const pageText = `${
+        document.body.innerText || ''
+      } ${
+        document.documentElement.innerHTML || ''
+      }`;
+
+      const tcinMatch =
+        pageText.match(
+          /TCIN[^0-9]{0,20}([0-9]{6,12})/i
+        ) ||
+        pageText.match(
+          /"tcin"\s*:\s*"?(\d{6,12})"?/i
+        );
+
+      return {
+        title,
+        imageUrl,
+
+        currentPrice:
+          uniquePrices[0] || 0,
+
+        originalPrice:
+          uniquePrices.length > 1
+            ? uniquePrices[
+                uniquePrices.length - 1
+              ]
+            : null,
+
+        sku: tcinMatch
+          ? tcinMatch[1]
+          : null,
+      };
+    });
+
+    const finalCurrentPrice =
+      Math.round(
+        Number(result.currentPrice || 0)
+      );
+
+    const finalOriginalPrice =
+      result.originalPrice
+        ? Math.round(
+            Number(result.originalPrice)
+          )
+        : null;
+
+    return {
+      title: cleanText(result.title)
+        .replace(/: Target$/, '')
+        .replace('| Target', '')
+        .trim(),
+
+      sku: result.sku || null,
+
+      retailer: 'Target',
+
+      currentPrice:
+        finalCurrentPrice || 0,
+
+      originalPrice:
+        finalOriginalPrice &&
+        finalOriginalPrice >
+          finalCurrentPrice
+          ? finalOriginalPrice
+          : null,
+
+      originalPriceAvailable:
+        Boolean(
+          finalOriginalPrice &&
+            finalOriginalPrice >
+              finalCurrentPrice
+        ),
+
+      imageUrl:
+        result.imageUrl || '',
+
+      source:
+        'target_basic_scraper_v1',
+    };
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (closeError) {
+        console.error(
+          'Browser close failed:',
+          closeError.message
+        );
       }
     }
   }
 }
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(
+    `Server running on port ${PORT}`
+  );
 });
