@@ -91,6 +91,14 @@ app.get('/search-deals', async (req, res) => {
       if (suspiciousLowPrice || suspiciousHighPrice) continue;
       if (confidence < 35) continue;
 
+      const verificationSignals = buildVerificationSignals(
+        q,
+        title,
+        displaySource,
+        extractedPrice,
+        confidence
+      );
+
       const deal = {
         title,
         price: Math.round(extractedPrice),
@@ -98,6 +106,7 @@ app.get('/search-deals', async (req, res) => {
         link: item.link || '',
         thumbnail: item.thumbnail || '',
         confidence,
+        verificationSignals,
       };
 
       const existing = retailerMap[sourceKey];
@@ -121,7 +130,7 @@ app.get('/search-deals', async (req, res) => {
     return res.json({
       query: q,
       resultCount: results.length,
-      source: 'serpapi_generic_match_scoring_v4',
+      source: 'serpapi_verification_signals_v5',
       results,
     });
   } catch (error) {
@@ -283,6 +292,130 @@ function genericIdentityAdjustment(queryText, titleText, price) {
   if (price < 20) adjustment -= 20;
 
   return adjustment;
+}
+
+function buildVerificationSignals(query, title, source, price, confidence) {
+  const queryText = String(query || '').toLowerCase();
+  const titleText = String(title || '').toLowerCase();
+  const sourceText = String(source || '').toLowerCase();
+
+  const signals = [];
+  const warnings = [];
+
+  const querySku = extractSkuFromText(query);
+  const titleSku = extractSkuFromText(title);
+
+  if (querySku && titleSku && querySku === titleSku) {
+    signals.push('SKU match');
+  } else if (querySku && titleText.includes(querySku.toLowerCase())) {
+    signals.push('SKU found in title');
+  } else if (querySku) {
+    warnings.push('SKU not confirmed');
+  }
+
+  if (queryText.includes('nike') && titleText.includes('nike')) {
+    signals.push('Brand match');
+  }
+
+  if (queryText.includes('dunk') && titleText.includes('dunk')) {
+    signals.push('Model match');
+  }
+
+  if (queryText.includes('air max') && titleText.includes('air max')) {
+    signals.push('Model match');
+  }
+
+  if (queryText.includes('force') && titleText.includes('force')) {
+    signals.push('Model match');
+  }
+
+  if (queryText.includes('low') && titleText.includes('low')) {
+    signals.push('Low-top match');
+  }
+
+  if (queryText.includes('high') && titleText.includes('high')) {
+    signals.push('High-top match');
+  }
+
+  if (queryText.includes('men') && titleText.includes('men')) {
+    signals.push("Men's match");
+  }
+
+  if (queryText.includes('women') && titleText.includes('women')) {
+    signals.push("Women's match");
+  }
+
+  if (sourceText.includes('nike')) {
+    signals.push('Official retailer');
+  } else if (
+    sourceText.includes('finish') ||
+    sourceText.includes('dick') ||
+    sourceText.includes('jdsports') ||
+    sourceText.includes('snipes')
+  ) {
+    signals.push('Known retailer');
+  } else if (sourceText.includes('goat') || sourceText.includes('stockx')) {
+    signals.push('Sneaker marketplace');
+  }
+
+  if (queryText.includes('men') && titleText.includes('women')) {
+    warnings.push('Gender mismatch risk');
+  }
+
+  if (queryText.includes('women') && titleText.includes('men')) {
+    warnings.push('Gender mismatch risk');
+  }
+
+  if (queryText.includes('low') && titleText.includes('high')) {
+    warnings.push('Silhouette mismatch risk');
+  }
+
+  if (queryText.includes('high') && titleText.includes('low')) {
+    warnings.push('Silhouette mismatch risk');
+  }
+
+  if (
+    titleText.includes('kids') ||
+    titleText.includes('youth') ||
+    titleText.includes('toddler') ||
+    titleText.includes('grade school') ||
+    titleText.includes(' gs ')
+  ) {
+    if (
+      !queryText.includes('kids') &&
+      !queryText.includes('youth') &&
+      !queryText.includes('toddler') &&
+      !queryText.includes('grade school') &&
+      !queryText.includes(' gs ')
+    ) {
+      warnings.push('Age group mismatch risk');
+    }
+  }
+
+  if (
+    titleText.includes('used') ||
+    titleText.includes('pre-owned') ||
+    titleText.includes('preowned')
+  ) {
+    warnings.push('Condition mismatch risk');
+  }
+
+  if (price < 35 && confidence < 90) {
+    warnings.push('Suspiciously low price');
+  }
+
+  if (confidence >= 80) {
+    signals.push('High-confidence match');
+  } else if (confidence >= 50) {
+    signals.push('Possible match');
+  } else {
+    warnings.push('Low-confidence match');
+  }
+
+  return {
+    positive: [...new Set(signals)].slice(0, 5),
+    warnings: [...new Set(warnings)].slice(0, 5),
+  };
 }
 
 function cleanPrice(value) {
