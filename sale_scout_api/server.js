@@ -89,7 +89,6 @@ app.get('/search-deals', async (req, res) => {
       const suspiciousHighPrice = extractedPrice > 350 && confidence < 90;
 
       if (suspiciousLowPrice || suspiciousHighPrice) continue;
-
       if (confidence < 35) continue;
 
       const deal = {
@@ -122,7 +121,7 @@ app.get('/search-deals', async (req, res) => {
     return res.json({
       query: q,
       resultCount: results.length,
-      source: 'serpapi_ai_match_scoring_v3_looser',
+      source: 'serpapi_generic_match_scoring_v4',
       results,
     });
   } catch (error) {
@@ -189,6 +188,10 @@ function extractSkuFromText(text) {
   return matches.find((m) => !m.startsWith('HTTP')) || matches[0];
 }
 
+function containsAny(text, words) {
+  return words.some((word) => text.includes(word));
+}
+
 function smartMatchConfidence(query, title, source, price) {
   const queryText = String(query || '').toLowerCase();
   const titleText = String(title || '').toLowerCase();
@@ -233,29 +236,53 @@ function smartMatchConfidence(query, title, source, price) {
   if (sourceText.includes('dick')) score += 5;
   if (sourceText.includes('goat') || sourceText.includes('stockx')) score += 3;
 
-  if (
-    titleText.includes('kids') ||
-    titleText.includes('baby') ||
-    titleText.includes('toddler')
-  ) {
-    score -= 25;
-  }
-
-  if (titleText.includes('youth') || titleText.includes('grade school')) {
-    score -= 18;
-  }
-
-  if (titleText.includes('women') && queryText.includes('men')) {
-    score -= 18;
-  }
-
-  if (titleText.includes('used') || titleText.includes('pre-owned')) {
-    score -= 12;
-  }
-
-  if (price < 20) score -= 20;
+  score += genericIdentityAdjustment(queryText, titleText, price);
 
   return Math.max(0, Math.min(100, score));
+}
+
+function genericIdentityAdjustment(queryText, titleText, price) {
+  let adjustment = 0;
+
+  const childTerms = ['kids', 'kid', 'baby', 'toddler', 'youth', 'grade school', 'gs'];
+  const usedTerms = ['used', 'pre-owned', 'preowned', 'worn', 'second hand'];
+  const bundleTerms = ['bundle', 'lot of', 'pack of', '2-pack', '3-pack', '4-pack'];
+
+  if (!containsAny(queryText, childTerms) && containsAny(titleText, childTerms)) {
+    adjustment -= 25;
+  }
+
+  if (!containsAny(queryText, usedTerms) && containsAny(titleText, usedTerms)) {
+    adjustment -= 18;
+  }
+
+  if (!containsAny(queryText, bundleTerms) && containsAny(titleText, bundleTerms)) {
+    adjustment -= 12;
+  }
+
+  if (queryText.includes('men') && titleText.includes('women')) {
+    adjustment -= 18;
+  }
+
+  if (queryText.includes('women') && titleText.includes('men')) {
+    adjustment -= 18;
+  }
+
+  if (queryText.includes('low') && titleText.includes('high')) {
+    adjustment -= 18;
+  }
+
+  if (queryText.includes('high') && titleText.includes('low')) {
+    adjustment -= 18;
+  }
+
+  if (queryText.includes('mid') && (titleText.includes('low') || titleText.includes('high'))) {
+    adjustment -= 10;
+  }
+
+  if (price < 20) adjustment -= 20;
+
+  return adjustment;
 }
 
 function cleanPrice(value) {
