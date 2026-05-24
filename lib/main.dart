@@ -8,7 +8,6 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:url_launcher/url_launcher.dart';
 
 import 'firebase_options.dart';
 
@@ -885,32 +884,6 @@ class _HomePageState extends State<HomePage> {
     return cream.withOpacity(.72);
   }
 
-  Future<void> openDealLink(String link) async {
-    final trimmedLink = link.trim();
-
-    if (trimmedLink.isEmpty) {
-      showMessage('No retailer link available yet.');
-      return;
-    }
-
-    final uri = Uri.tryParse(trimmedLink);
-
-    if (uri == null || !uri.hasScheme) {
-      showMessage('Invalid retailer link.');
-      return;
-    }
-
-    final opened = await launchUrl(
-      uri,
-      mode: LaunchMode.externalApplication,
-      webOnlyWindowName: '_blank',
-    );
-
-    if (!opened) {
-      showMessage('Could not open retailer link.');
-    }
-  }
-
   Future<void> logout() async {
     await FirebaseAuth.instance.signOut();
   }
@@ -1490,55 +1463,29 @@ class _HomePageState extends State<HomePage> {
           const SizedBox(height: 7),
           ...item.dealResults.take(4).map((deal) {
             final cheaper = deal.price < item.currentPrice;
-            final hasLink = deal.link.trim().isNotEmpty;
 
-            return InkWell(
-              onTap: hasLink ? () => openDealLink(deal.link) : null,
-              borderRadius: BorderRadius.circular(10),
-              child: Container(
-                margin: const EdgeInsets.only(bottom: 6),
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-                decoration: BoxDecoration(
-                  color: cheaper
-                      ? lightGreen.withOpacity(.10)
-                      : cream.withOpacity(.04),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(
-                    color: cheaper
-                        ? lightGreen.withOpacity(.22)
-                        : cream.withOpacity(.08),
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Row(
+                children: [
+                  Icon(
+                    cheaper ? Icons.local_offer : Icons.storefront,
+                    size: 16,
+                    color: cheaper ? lightGreen : cream.withOpacity(.6),
                   ),
-                ),
-                child: Row(
-                  children: [
-                    Icon(
-                      cheaper ? Icons.local_offer : Icons.storefront,
-                      size: 16,
-                      color: cheaper ? lightGreen : cream.withOpacity(.65),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        '${deal.source}: \$${deal.price}',
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: cheaper ? lightGreen : cream.withOpacity(.88),
-                          fontSize: 13,
-                          fontWeight:
-                              cheaper ? FontWeight.bold : FontWeight.w600,
-                        ),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: Text(
+                      '${deal.source}: \$${deal.price}',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: cheaper ? lightGreen : cream.withOpacity(.84),
+                        fontSize: 13,
+                        fontWeight: cheaper ? FontWeight.bold : FontWeight.w500,
                       ),
                     ),
-                    if (hasLink) ...[
-                      const SizedBox(width: 6),
-                      Icon(
-                        Icons.open_in_new,
-                        size: 15,
-                        color: cream.withOpacity(.62),
-                      ),
-                    ],
-                  ],
-                ),
+                  ),
+                ],
               ),
             );
           }),
