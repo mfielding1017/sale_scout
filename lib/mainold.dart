@@ -8,7 +8,6 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:url_launcher/url_launcher.dart';
 
 import 'firebase_options.dart';
 
@@ -258,8 +257,6 @@ class DealResult {
   final String source;
   final String link;
   final String thumbnail;
-  final int confidence;
-  final Map<String, dynamic> verificationSignals;
 
   DealResult({
     required this.title,
@@ -267,8 +264,6 @@ class DealResult {
     required this.source,
     required this.link,
     required this.thumbnail,
-    required this.confidence,
-    required this.verificationSignals,
   });
 
   Map<String, dynamic> toJson() => {
@@ -277,13 +272,10 @@ class DealResult {
         'source': source,
         'link': link,
         'thumbnail': thumbnail,
-        'confidence': confidence,
-        'verificationSignals': verificationSignals,
       };
 
   factory DealResult.fromJson(Map<String, dynamic> json) {
     final rawPrice = json['price'];
-    final rawSignals = json['verificationSignals'];
 
     return DealResult(
       title: json['title']?.toString() ?? '',
@@ -293,15 +285,6 @@ class DealResult {
       source: json['source']?.toString() ?? '',
       link: json['link']?.toString() ?? '',
       thumbnail: json['thumbnail']?.toString() ?? '',
-      confidence: json['confidence'] is num
-          ? (json['confidence'] as num).round()
-          : int.tryParse((json['confidence'] ?? '0').toString()) ?? 0,
-      verificationSignals: rawSignals is Map
-          ? Map<String, dynamic>.from(rawSignals)
-          : <String, dynamic>{
-              'positive': <dynamic>[],
-              'warnings': <dynamic>[],
-            },
     );
   }
 }
@@ -309,7 +292,6 @@ class DealResult {
 class ProductItem {
   final String url;
   final String title;
-  final String sku;
   final String retailer;
   final int currentPrice;
   final int originalPrice;
@@ -327,7 +309,6 @@ class ProductItem {
   ProductItem({
     required this.url,
     required this.title,
-    required this.sku,
     required this.retailer,
     required this.currentPrice,
     required this.originalPrice,
@@ -346,7 +327,6 @@ class ProductItem {
   Map<String, dynamic> toJson() => {
         'url': url,
         'title': title,
-        'sku': sku,
         'retailer': retailer,
         'currentPrice': currentPrice,
         'originalPrice': originalPrice,
@@ -373,7 +353,6 @@ class ProductItem {
     return ProductItem(
       url: json['url'] ?? '',
       title: json['title'] ?? 'Unknown Product',
-      sku: json['sku'] ?? '',
       retailer: json['retailer'] ?? 'Unknown',
       currentPrice: (json['currentPrice'] ?? 0).round(),
       originalPrice: (json['originalPrice'] ?? 0).round(),
@@ -544,14 +523,9 @@ class _HomePageState extends State<HomePage> {
     }, SetOptions(merge: true));
   }
 
-  Future<List<DealResult>> searchDealsForProduct(
-    String title,
-    String sku,
-  ) async {
+  Future<List<DealResult>> searchDealsForProduct(String title) async {
     try {
-      final searchQuery = sku.isNotEmpty ? '$title $sku' : title;
-
-      final encodedQuery = Uri.encodeComponent(searchQuery);
+      final encodedQuery = Uri.encodeComponent(title);
 
       final response = await http
           .get(
@@ -671,16 +645,14 @@ class _HomePageState extends State<HomePage> {
       final originalAvailable = data['originalPriceAvailable'] ?? false;
       final rawOriginal = data['originalPrice'];
       final betterDeal = data['betterDeal'];
-      final sku = (data['sku'] ?? '').toString().trim();
 
-      final deals = await searchDealsForProduct(title, sku);
+      final deals = await searchDealsForProduct(title);
       final cheapestDeal =
           deals.isEmpty ? null : deals.reduce((a, b) => a.price < b.price ? a : b);
 
       return ProductItem(
         url: url,
         title: title,
-        sku: sku,
         retailer: retailer,
         currentPrice: newPrice,
         originalPrice: rawOriginal is num ? rawOriginal.round() : 0,
@@ -868,55 +840,6 @@ class _HomePageState extends State<HomePage> {
     if (item.priceHistory.isEmpty) return item.currentPrice;
 
     return item.priceHistory.map((entry) => entry['price'] as int).reduce(max);
-  }
-
-  double averagePrice(ProductItem item) {
-    if (item.priceHistory.isEmpty) {
-      return item.currentPrice.toDouble();
-    }
-
-    final prices = item.priceHistory
-        .map((entry) => (entry['price'] as int).toDouble())
-        .toList();
-
-    final total = prices.reduce((a, b) => a + b);
-
-    return total / prices.length;
-  }
-
-  int averageDifference(ProductItem item) {
-    final avg = averagePrice(item);
-
-    if (avg <= 0) return 0;
-
-    return (((item.currentPrice - avg) / avg) * 100).round();
-  }
-
-  String smartPriceInsight(ProductItem item) {
-    if (item.priceHistory.length < 2) {
-      return 'Building price history';
-    }
-
-    final difference = averageDifference(item);
-
-    if (difference <= -10) {
-      return '${difference.abs()}% below average';
-    }
-
-    if (difference >= 10) {
-      return '${difference.abs()}% above average';
-    }
-
-    return 'Near average price';
-  }
-
-  Color smartPriceInsightColor(ProductItem item) {
-    final difference = averageDifference(item);
-
-    if (difference <= -10) return lightGreen;
-    if (difference >= 10) return Colors.redAccent;
-
-    return cream.withOpacity(.72);
   }
 
   String trendLabel(ProductItem item) {
@@ -1425,28 +1348,6 @@ class _HomePageState extends State<HomePage> {
                 fontSize: 13,
               ),
             ),
-            Text(
-              'High: \$${highestPrice(item)}',
-              style: TextStyle(
-                color: cream.withOpacity(.68),
-                fontSize: 13,
-              ),
-            ),
-            Text(
-              'Avg: \$${averagePrice(item).round()}',
-              style: TextStyle(
-                color: cream.withOpacity(.68),
-                fontSize: 13,
-              ),
-            ),
-            Text(
-              smartPriceInsight(item),
-              style: TextStyle(
-                color: smartPriceInsightColor(item),
-                fontSize: 13,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
           ],
         ),
         const SizedBox(height: 9),
@@ -1504,38 +1405,6 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-
-  Future<void> openDealLink(String link) async {
-    final trimmedLink = link.trim();
-
-    if (trimmedLink.isEmpty) {
-      showMessage('No retailer link available for this deal yet.');
-      return;
-    }
-
-    final uri = Uri.tryParse(trimmedLink);
-
-    if (uri == null || !uri.hasScheme) {
-      showMessage('Invalid retailer link.');
-      return;
-    }
-
-    try {
-      final opened = await launchUrl(
-        uri,
-        mode: LaunchMode.externalApplication,
-      );
-
-      if (!opened) {
-        showMessage('Could not open retailer link.');
-      }
-    } catch (e) {
-      print('OPEN DEAL LINK ERROR: $e');
-      showMessage('Could not open retailer link.');
-    }
-  }
-
-
   Widget _dealResultsSection(ProductItem item) {
     if (item.dealResults.isEmpty) {
       return Container(
@@ -1557,85 +1426,7 @@ class _HomePageState extends State<HomePage> {
       );
     }
 
-    final bestMatches =
-        item.dealResults.where((deal) => deal.confidence >= 80).toList();
-
-    final possibleMatches =
-        item.dealResults.where((deal) => deal.confidence < 80).toList();
-
-    Widget dealRow(DealResult deal) {
-      final cheaper = deal.price < item.currentPrice;
-
-      return Padding(
-        padding: const EdgeInsets.only(bottom: 8),
-        child: Container(
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.03),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: cream.withOpacity(.08)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Icon(
-                    cheaper ? Icons.local_offer : Icons.storefront,
-                    size: 16,
-                    color: cheaper ? lightGreen : cream.withOpacity(.6),
-                  ),
-                  const SizedBox(width: 7),
-                  Expanded(
-                    child: Text(
-                      '${deal.source}: \$${deal.price} • ${deal.confidence}% match',
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: cheaper ? lightGreen : cream.withOpacity(.84),
-                        fontSize: 13,
-                        fontWeight:
-                            cheaper ? FontWeight.bold : FontWeight.w500,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              if (deal.title.isNotEmpty) ...[
-                const SizedBox(height: 4),
-                Text(
-                  deal.title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: cream.withOpacity(.58),
-                    fontSize: 11,
-                    height: 1.15,
-                  ),
-                ),
-              ],
-              _verificationSignalsChips(deal),
-              const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: () => openDealLink(deal.link),
-                  icon: const Icon(Icons.open_in_new, size: 16),
-                  label: const Text('Open Deal'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: lightGreen,
-                    foregroundColor: green,
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
+    final cheapest = item.dealResults.first;
 
     return Container(
       width: double.infinity,
@@ -1648,104 +1439,45 @@ class _HomePageState extends State<HomePage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (bestMatches.isNotEmpty) ...[
-            Text(
-              'Best Matches',
-              style: TextStyle(
-                color: lightGreen,
-                fontSize: 13,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 7),
-            ...bestMatches.take(4).map(dealRow),
-          ],
-          if (possibleMatches.isNotEmpty) ...[
-            if (bestMatches.isNotEmpty) const SizedBox(height: 6),
-            Text(
-              'Possible Matches',
-              style: TextStyle(
-                color: cream.withOpacity(.75),
-                fontSize: 12,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 7),
-            ...possibleMatches.take(4).map(dealRow),
-          ],
-        ],
-      ),
-    );
-  }
-
-  List<String> _signalList(Map<String, dynamic> signals, String key) {
-    final raw = signals[key];
-
-    if (raw is List) {
-      return raw.map((signal) => signal.toString()).toList();
-    }
-
-    return [];
-  }
-
-  Widget _verificationSignalsChips(DealResult deal) {
-    final positives = _signalList(deal.verificationSignals, 'positive');
-    final warnings = _signalList(deal.verificationSignals, 'warnings');
-
-    if (positives.isEmpty && warnings.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    Widget chip({
-      required String text,
-      required IconData icon,
-      required Color color,
-    }) {
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
-        decoration: BoxDecoration(
-          color: color.withOpacity(.14),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: color.withOpacity(.72)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 12, color: color),
-            const SizedBox(width: 4),
-            Text(
-              text,
-              style: TextStyle(
-                color: color,
-                fontSize: 11,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    return Padding(
-      padding: const EdgeInsets.only(top: 7),
-      child: Wrap(
-        spacing: 6,
-        runSpacing: 6,
-        children: [
-          ...positives.map(
-            (signal) => chip(
-              text: signal,
-              icon: Icons.check_circle,
-              color: lightGreen,
+          Text(
+            cheapest.price < item.currentPrice
+                ? 'Found cheaper elsewhere'
+                : 'Cross-retailer prices',
+            style: TextStyle(
+              color: cheapest.price < item.currentPrice ? lightGreen : cream,
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
             ),
           ),
-          ...warnings.map(
-            (signal) => chip(
-              text: signal,
-              icon: Icons.warning_amber_rounded,
-              color: gold,
-            ),
-          ),
+          const SizedBox(height: 7),
+          ...item.dealResults.take(4).map((deal) {
+            final cheaper = deal.price < item.currentPrice;
+
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Row(
+                children: [
+                  Icon(
+                    cheaper ? Icons.local_offer : Icons.storefront,
+                    size: 16,
+                    color: cheaper ? lightGreen : cream.withOpacity(.6),
+                  ),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: Text(
+                      '${deal.source}: \$${deal.price}',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: cheaper ? lightGreen : cream.withOpacity(.84),
+                        fontSize: 13,
+                        fontWeight: cheaper ? FontWeight.bold : FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }),
         ],
       ),
     );
