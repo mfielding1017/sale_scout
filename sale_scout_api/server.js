@@ -6,38 +6,29 @@ process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
 const { chromium } = require('playwright');
 
 const app = express();
-
 app.use(cors());
 
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-  res.json({
-    status: 'ok',
-    message: 'Sale Scout API Running',
-  });
+  res.json({ status: 'ok', message: 'Sale Scout API Running' });
 });
 
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-  });
+  res.json({ status: 'healthy' });
 });
 
 app.get('/product', async (req, res) => {
   const url = req.query.url;
 
-  if (!url) {
-    return res.status(400).json({
-      error: 'Missing product URL',
-    });
-  }
+  if (!url) return res.status(400).json({ error: 'Missing product URL' });
 
   try {
     const product = await scrapeNike(url);
 
     console.log({
       title: product.title,
+      sku: product.sku,
       currentPrice: product.currentPrice,
       originalPrice: product.originalPrice,
       source: product.source,
@@ -55,12 +46,10 @@ app.get('/product', async (req, res) => {
 });
 
 app.get('/search-deals', async (req, res) => {
-  const query = req.query.q;
+  const q = req.query.q;
 
-  if (!query) {
-    return res.status(400).json({
-      error: 'Missing search query',
-    });
+  if (!q) {
+    return res.status(400).json({ error: 'Missing search query' });
   }
 
   try {
@@ -72,30 +61,63 @@ app.get('/search-deals', async (req, res) => {
       });
     }
 
-    const url =
+    const serpUrl =
       `https://serpapi.com/search.json` +
       `?engine=google_shopping` +
-      `&q=${encodeURIComponent(query)}` +
+      `&q=${encodeURIComponent(q)}` +
       `&api_key=${apiKey}`;
 
-    const response = await fetch(url);
-
+    const response = await fetch(serpUrl);
     const data = await response.json();
 
-    const shoppingResults = (data.shopping_results || [])
-      .slice(0, 10)
-      .map((item) => ({
-        title: item.title || '',
-        price: item.extracted_price || 0,
-        source: item.source || '',
+    const rawResults = data.shopping_results || [];
+    const retailerMap = {};
+
+    for (const item of rawResults) {
+      const title = item.title || '';
+      const rawSource = item.source || 'Unknown';
+      const sourceKey = normalizeRetailerSource(rawSource);
+      const displaySource = cleanRetailerDisplayName(rawSource);
+
+      const extractedPrice =
+        typeof item.extracted_price === 'number'
+          ? item.extracted_price
+          : typeof item.price === 'number'
+            ? item.price
+            : parseFloat(
+                String(item.price || '').replace('$', '').replace(',', '')
+              );
+
+      if (!title || !displaySource || !sourceKey || !extractedPrice) continue;
+
+      const confidence = basicMatchConfidence(q, title);
+      if (confidence < 45) continue;
+
+      const deal = {
+        title,
+        price: Math.round(extractedPrice),
+        source: displaySource,
         link: item.link || '',
         thumbnail: item.thumbnail || '',
-      }));
+        confidence,
+      };
+
+      const existing = retailerMap[sourceKey];
+
+      if (!existing || deal.price < existing.price) {
+        retailerMap[sourceKey] = deal;
+      }
+    }
+
+    const results = Object.values(retailerMap)
+      .sort((a, b) => a.price - b.price)
+      .slice(0, 8);
 
     return res.json({
-      query,
-      resultCount: shoppingResults.length,
-      results: shoppingResults,
+      query: q,
+      resultCount: results.length,
+      source: 'serpapi_retailer_dedup_v3',
+      results,
     });
   } catch (error) {
     console.error('SEARCH DEALS ERROR:', error.message);
@@ -106,6 +128,57 @@ app.get('/search-deals', async (req, res) => {
     });
   }
 });
+
+function normalizeRetailerSource(source) {
+  const cleaned = String(source || '')
+    .toLowerCase()
+    .replace(/\.com/g, '')
+    .replace(/[^a-z0-9]/g, '')
+    .trim();
+
+  if (cleaned.includes('nike')) return 'nike';
+  if (cleaned.includes('finishline')) return 'finishline';
+  if (cleaned.includes('dicks') || cleaned.includes('dickssportinggoods')) {
+    return 'dickssportinggoods';
+  }
+  if (cleaned.includes('jdsports')) return 'jdsports';
+  if (cleaned.includes('snipes')) return 'snipes';
+
+  return cleaned;
+}
+
+function cleanRetailerDisplayName(source) {
+  const key = normalizeRetailerSource(source);
+
+  const displayNames = {
+    nike: 'Nike',
+    finishline: 'Finish Line',
+    dickssportinggoods: "Dick's Sporting Goods",
+    jdsports: 'JD Sports',
+    snipes: 'SNIPES USA',
+  };
+
+  return displayNames[key] || String(source || '').replace(/\s+/g, ' ').trim();
+}
+
+function basicMatchConfidence(query, title) {
+  const queryWords = String(query || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .split(/\s+/)
+    .filter((word) => word.length > 2);
+
+  if (queryWords.length === 0) return 0;
+
+  const titleText = String(title || '').toLowerCase();
+  let score = 0;
+
+  for (const word of queryWords) {
+    if (titleText.includes(word)) score++;
+  }
+
+  return Math.round((score / queryWords.length) * 100);
+}
 
 function cleanPrice(value) {
   if (!value) return null;
@@ -135,6 +208,21 @@ function cleanNikeTitle(title) {
     .trim();
 }
 
+function extractSkuFromText(text) {
+  const value = String(text || '').toUpperCase();
+  const matches = value.match(/\b[A-Z0-9]{6}-[0-9]{3}\b/g);
+
+  if (!matches || matches.length === 0) return null;
+
+  for (const match of matches) {
+    if (!match.startsWith('HTTP') && !match.startsWith('HTTPS')) {
+      return match;
+    }
+  }
+
+  return matches[0];
+}
+
 async function scrapeNike(url) {
   let browser;
 
@@ -150,10 +238,7 @@ async function scrapeNike(url) {
     });
 
     const page = await browser.newPage({
-      viewport: {
-        width: 1200,
-        height: 900,
-      },
+      viewport: { width: 1200, height: 900 },
       userAgent:
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
     });
@@ -190,10 +275,7 @@ async function scrapeNike(url) {
         document.title ||
         'Nike Product';
 
-      const imageUrl =
-        getMeta('og:image') ||
-        getMeta('twitter:image') ||
-        '';
+      const imageUrl = getMeta('og:image') || getMeta('twitter:image') || '';
 
       const currentPriceEl =
         document.querySelector('[data-testid="currentPrice-container"]') ||
@@ -230,12 +312,21 @@ async function scrapeNike(url) {
         .filter((item) => item.text.includes('$'))
         .filter((item) => item.text.length <= 100);
 
+      const pageText = `${
+        document.body.innerText || ''
+      } ${document.documentElement.innerHTML || ''}`.toUpperCase();
+
+      const skuMatch =
+        pageText.match(/\b[A-Z0-9]{6}-[0-9]{3}\b/) ||
+        pageText.match(/\b[A-Z]{2}[0-9]{4}-[0-9]{3}\b/);
+
       return {
         title,
         imageUrl,
         currentPriceText,
         originalPriceText,
         visiblePriceCandidates,
+        sku: skuMatch ? skuMatch[0] : null,
       };
     });
 
@@ -253,15 +344,15 @@ async function scrapeNike(url) {
       const uniquePrices = [...new Set(fallbackPrices)].sort((a, b) => a - b);
 
       finalCurrentPrice = uniquePrices[0] || 0;
-
       finalOriginalPrice =
-        uniquePrices.length > 1
-          ? uniquePrices[uniquePrices.length - 1]
-          : null;
+        uniquePrices.length > 1 ? uniquePrices[uniquePrices.length - 1] : null;
     }
+
+    const finalSku = result.sku || extractSkuFromText(url);
 
     return {
       title: cleanNikeTitle(result.title),
+      sku: finalSku,
       retailer: 'Nike',
       currentPrice: finalCurrentPrice || 0,
       originalPrice:
@@ -272,14 +363,14 @@ async function scrapeNike(url) {
         finalOriginalPrice && finalOriginalPrice > finalCurrentPrice
       ),
       imageUrl: result.imageUrl || '',
-      source: 'nike_serpapi_phase1',
+      source: 'nike_sku_detection_v1',
     };
   } finally {
     if (browser) {
       try {
         await browser.close();
       } catch (closeError) {
-        console.error(closeError.message);
+        console.error('Browser close failed:', closeError.message);
       }
     }
   }
