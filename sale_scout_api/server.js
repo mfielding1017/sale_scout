@@ -25,19 +25,9 @@ app.get('/product', async (req, res) => {
 
   try {
     const product = await scrapeNike(url);
-
-    console.log({
-      title: product.title,
-      sku: product.sku,
-      currentPrice: product.currentPrice,
-      originalPrice: product.originalPrice,
-      source: product.source,
-    });
-
     return res.json(product);
   } catch (error) {
     console.error('PRODUCT ERROR:', error.message);
-
     return res.status(500).json({
       error: 'Failed to fetch product',
       details: error.message,
@@ -48,9 +38,7 @@ app.get('/product', async (req, res) => {
 app.get('/search-deals', async (req, res) => {
   const q = req.query.q;
 
-  if (!q) {
-    return res.status(400).json({ error: 'Missing search query' });
-  }
+  if (!q) return res.status(400).json({ error: 'Missing search query' });
 
   try {
     const apiKey = process.env.SERPAPI_KEY;
@@ -90,8 +78,9 @@ app.get('/search-deals', async (req, res) => {
 
       if (!title || !displaySource || !sourceKey || !extractedPrice) continue;
 
-      const confidence = basicMatchConfidence(q, title);
-      if (confidence < 45) continue;
+      const confidence = smartMatchConfidence(q, title, displaySource, extractedPrice);
+
+      if (confidence < 55) continue;
 
       const deal = {
         title,
@@ -104,24 +93,30 @@ app.get('/search-deals', async (req, res) => {
 
       const existing = retailerMap[sourceKey];
 
-      if (!existing || deal.price < existing.price) {
+      if (
+        !existing ||
+        deal.confidence > existing.confidence ||
+        (deal.confidence === existing.confidence && deal.price < existing.price)
+      ) {
         retailerMap[sourceKey] = deal;
       }
     }
 
     const results = Object.values(retailerMap)
-      .sort((a, b) => a.price - b.price)
+      .sort((a, b) => {
+        if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+        return a.price - b.price;
+      })
       .slice(0, 8);
 
     return res.json({
       query: q,
       resultCount: results.length,
-      source: 'serpapi_retailer_dedup_v3',
+      source: 'serpapi_ai_match_scoring_v1',
       results,
     });
   } catch (error) {
     console.error('SEARCH DEALS ERROR:', error.message);
-
     return res.status(500).json({
       error: 'Failed to search deals',
       details: error.message,
@@ -138,11 +133,12 @@ function normalizeRetailerSource(source) {
 
   if (cleaned.includes('nike')) return 'nike';
   if (cleaned.includes('finishline')) return 'finishline';
-  if (cleaned.includes('dicks') || cleaned.includes('dickssportinggoods')) {
-    return 'dickssportinggoods';
-  }
+  if (cleaned.includes('dicks') || cleaned.includes('dickssportinggoods')) return 'dickssportinggoods';
   if (cleaned.includes('jdsports')) return 'jdsports';
   if (cleaned.includes('snipes')) return 'snipes';
+  if (cleaned.includes('goat')) return 'goat';
+  if (cleaned.includes('stockx')) return 'stockx';
+  if (cleaned.includes('ebay')) return 'ebay';
 
   return cleaned;
 }
@@ -156,28 +152,67 @@ function cleanRetailerDisplayName(source) {
     dickssportinggoods: "Dick's Sporting Goods",
     jdsports: 'JD Sports',
     snipes: 'SNIPES USA',
+    goat: 'GOAT',
+    stockx: 'StockX',
+    ebay: 'eBay',
   };
 
   return displayNames[key] || String(source || '').replace(/\s+/g, ' ').trim();
 }
 
-function basicMatchConfidence(query, title) {
-  const queryWords = String(query || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, '')
-    .split(/\s+/)
-    .filter((word) => word.length > 2);
+function extractSkuFromText(text) {
+  const value = String(text || '').toUpperCase();
+  const matches = value.match(/\b[A-Z0-9]{6}-[0-9]{3}\b/g);
+  if (!matches || matches.length === 0) return null;
+  return matches.find((m) => !m.startsWith('HTTP')) || matches[0];
+}
 
-  if (queryWords.length === 0) return 0;
-
+function smartMatchConfidence(query, title, source, price) {
+  const queryText = String(query || '').toLowerCase();
   const titleText = String(title || '').toLowerCase();
+  const sourceText = String(source || '').toLowerCase();
+
+  const querySku = extractSkuFromText(query);
+  const titleSku = extractSkuFromText(title);
+
   let score = 0;
 
-  for (const word of queryWords) {
-    if (titleText.includes(word)) score++;
+  if (querySku && titleSku && querySku === titleSku) score += 55;
+  if (querySku && titleText.includes(querySku.toLowerCase())) score += 45;
+
+  const importantWords = queryText
+    .replace(/[^a-z0-9\s-]/g, '')
+    .split(/\s+/)
+    .filter((word) => word.length > 2)
+    .filter((word) => !['mens', 'womens', 'shoes', 'shoe', 'nike'].includes(word));
+
+  let matchedWords = 0;
+
+  for (const word of importantWords) {
+    if (titleText.includes(word)) matchedWords++;
   }
 
-  return Math.round((score / queryWords.length) * 100);
+  if (importantWords.length > 0) {
+    score += Math.round((matchedWords / importantWords.length) * 35);
+  }
+
+  if (queryText.includes('nike') && titleText.includes('nike')) score += 10;
+  if (queryText.includes('air max') && titleText.includes('air max')) score += 10;
+  if (queryText.includes('dunk') && titleText.includes('dunk')) score += 10;
+  if (queryText.includes('force') && titleText.includes('force')) score += 10;
+
+  if (sourceText.includes('nike')) score += 8;
+  if (sourceText.includes('finish')) score += 5;
+  if (sourceText.includes('dick')) score += 5;
+  if (sourceText.includes('goat') || sourceText.includes('stockx')) score += 3;
+
+  if (titleText.includes('kids') || titleText.includes('baby') || titleText.includes('toddler')) score -= 25;
+  if (titleText.includes('youth') || titleText.includes('grade school')) score -= 18;
+  if (titleText.includes('women') && queryText.includes("men")) score -= 18;
+  if (titleText.includes('used') || titleText.includes('pre-owned')) score -= 12;
+  if (price < 20) score -= 20;
+
+  return Math.max(0, Math.min(100, score));
 }
 
 function cleanPrice(value) {
@@ -208,21 +243,6 @@ function cleanNikeTitle(title) {
     .trim();
 }
 
-function extractSkuFromText(text) {
-  const value = String(text || '').toUpperCase();
-  const matches = value.match(/\b[A-Z0-9]{6}-[0-9]{3}\b/g);
-
-  if (!matches || matches.length === 0) return null;
-
-  for (const match of matches) {
-    if (!match.startsWith('HTTP') && !match.startsWith('HTTPS')) {
-      return match;
-    }
-  }
-
-  return matches[0];
-}
-
 async function scrapeNike(url) {
   let browser;
 
@@ -245,12 +265,8 @@ async function scrapeNike(url) {
 
     await page.route('**/*', (route) => {
       const type = route.request().resourceType();
-
-      if (['image', 'font', 'media'].includes(type)) {
-        route.abort();
-      } else {
-        route.continue();
-      }
+      if (['image', 'font', 'media'].includes(type)) route.abort();
+      else route.continue();
     });
 
     await page.goto(url, {
@@ -293,9 +309,7 @@ async function scrapeNike(url) {
         ? originalPriceEl.innerText || originalPriceEl.textContent || ''
         : '';
 
-      const visiblePriceCandidates = Array.from(
-        document.querySelectorAll('body *')
-      )
+      const visiblePriceCandidates = Array.from(document.querySelectorAll('body *'))
         .map((el) => {
           const rect = el.getBoundingClientRect();
 
