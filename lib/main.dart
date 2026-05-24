@@ -292,6 +292,7 @@ class DealResult {
 class ProductItem {
   final String url;
   final String title;
+  final String sku;
   final String retailer;
   final int currentPrice;
   final int originalPrice;
@@ -309,6 +310,7 @@ class ProductItem {
   ProductItem({
     required this.url,
     required this.title,
+    required this.sku,
     required this.retailer,
     required this.currentPrice,
     required this.originalPrice,
@@ -327,6 +329,7 @@ class ProductItem {
   Map<String, dynamic> toJson() => {
         'url': url,
         'title': title,
+        'sku': sku,
         'retailer': retailer,
         'currentPrice': currentPrice,
         'originalPrice': originalPrice,
@@ -353,6 +356,7 @@ class ProductItem {
     return ProductItem(
       url: json['url'] ?? '',
       title: json['title'] ?? 'Unknown Product',
+      sku: json['sku'] ?? '',
       retailer: json['retailer'] ?? 'Unknown',
       currentPrice: (json['currentPrice'] ?? 0).round(),
       originalPrice: (json['originalPrice'] ?? 0).round(),
@@ -523,9 +527,14 @@ class _HomePageState extends State<HomePage> {
     }, SetOptions(merge: true));
   }
 
-  Future<List<DealResult>> searchDealsForProduct(String title) async {
+  Future<List<DealResult>> searchDealsForProduct(
+    String title,
+    String sku,
+  ) async {
     try {
-      final encodedQuery = Uri.encodeComponent(title);
+      final searchQuery = sku.isNotEmpty ? '$title $sku' : title;
+
+      final encodedQuery = Uri.encodeComponent(searchQuery);
 
       final response = await http
           .get(
@@ -645,14 +654,16 @@ class _HomePageState extends State<HomePage> {
       final originalAvailable = data['originalPriceAvailable'] ?? false;
       final rawOriginal = data['originalPrice'];
       final betterDeal = data['betterDeal'];
+      final sku = (data['sku'] ?? '').toString().trim();
 
-      final deals = await searchDealsForProduct(title);
+      final deals = await searchDealsForProduct(title, sku);
       final cheapestDeal =
           deals.isEmpty ? null : deals.reduce((a, b) => a.price < b.price ? a : b);
 
       return ProductItem(
         url: url,
         title: title,
+        sku: sku,
         retailer: retailer,
         currentPrice: newPrice,
         originalPrice: rawOriginal is num ? rawOriginal.round() : 0,
