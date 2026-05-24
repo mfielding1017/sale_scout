@@ -89,29 +89,102 @@ app.get('/search-deals', async (req, res) => {
       const suspiciousHighPrice = extractedPrice > 350 && confidence < 90;
 
       if (suspiciousLowPrice || suspiciousHighPrice) continue;
-
       if (confidence < 35) continue;
 
-const fallbackSearchLink =
-  `https://www.google.com/search?tbm=shop&q=${encodeURIComponent(
-    `${title} ${displaySource}`
-  )}`;
+      const fallbackSearchLink =
+        `https://www.google.com/search?tbm=shop&q=${encodeURIComponent(
+          `${title} ${displaySource}`
+        )}`;
 
-const deal = {
-  title,
-  price: Math.round(extractedPrice),
-  source: displaySource,
-  link:
-    item.link ||
-    item.product_link ||
-    item.productLink ||
-    item.serpapi_link ||
-    item.serpapiLink ||
-    item.serpapi_product_api ||
-    fallbackSearchLink,
-  thumbnail: item.thumbnail || '',
-  confidence,
-};
+      const querySku = extractSkuFromText(q);
+      const titleSku = extractSkuFromText(title);
+      const titleText = title.toLowerCase();
+      const queryText = q.toLowerCase();
+
+      const verificationSignals = {
+        positive: [],
+        warnings: [],
+      };
+
+      if (querySku && titleSku && querySku === titleSku) {
+        verificationSignals.positive.push('SKU match');
+      }
+
+      if (titleText.includes('nike')) {
+        verificationSignals.positive.push('Brand match');
+      }
+
+      if (titleText.includes('dunk')) {
+        verificationSignals.positive.push('Model match');
+      }
+
+      if (titleText.includes('low')) {
+        verificationSignals.positive.push('Low-top match');
+      }
+
+      if (
+        titleText.includes('men') ||
+        titleText.includes("men's") ||
+        titleText.includes('mens')
+      ) {
+        verificationSignals.positive.push("Men's match");
+      }
+
+      if (confidence >= 80) {
+        verificationSignals.positive.push('High-confidence match');
+      }
+
+      if (!querySku || !titleSku || querySku !== titleSku) {
+        verificationSignals.warnings.push('SKU not confirmed');
+      }
+
+      if (confidence < 60) {
+        verificationSignals.warnings.push('Low-confidence match');
+      }
+
+      if (
+        titleText.includes('kids') ||
+        titleText.includes('grade school') ||
+        titleText.includes('gs') ||
+        titleText.includes('youth') ||
+        titleText.includes('toddler') ||
+        titleText.includes('baby')
+      ) {
+        verificationSignals.warnings.push('Age group mismatch risk');
+      }
+
+      if (
+        titleText.includes('women') &&
+        (queryText.includes('men') || queryText.includes("men's"))
+      ) {
+        verificationSignals.warnings.push('Gender mismatch risk');
+      }
+
+      if (
+        titleText.includes('used') ||
+        titleText.includes('pre-owned') ||
+        titleText.includes('preowned')
+      ) {
+        verificationSignals.warnings.push('Condition mismatch risk');
+      }
+
+      const deal = {
+        title,
+        price: Math.round(extractedPrice),
+        source: displaySource,
+        link:
+          item.link ||
+          item.product_link ||
+          item.productLink ||
+          item.serpapi_link ||
+          item.serpapiLink ||
+          item.serpapi_product_api ||
+          fallbackSearchLink,
+        thumbnail: item.thumbnail || '',
+        confidence,
+        verificationSignals,
+      };
+
       const existing = retailerMap[sourceKey];
 
       if (
@@ -133,7 +206,7 @@ const deal = {
     return res.json({
       query: q,
       resultCount: results.length,
-      source: 'serpapi_ai_match_scoring_v3_looser',
+      source: 'serpapi_verification_signals_v6_links',
       results,
     });
   } catch (error) {
