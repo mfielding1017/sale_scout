@@ -92,11 +92,6 @@ app.get('/search-deals', async (req, res) => {
 
       if (confidence < 35) continue;
 
-      const fallbackSearchLink =
-  `https://www.google.com/search?tbm=shop&q=${encodeURIComponent(
-    `${title} ${displaySource}`
-  )}`;
-
 const fallbackSearchLink =
   `https://www.google.com/search?tbm=shop&q=${encodeURIComponent(
     `${title} ${displaySource}`
