@@ -1164,7 +1164,7 @@ app.get('/debug-target-network', async (req, res) => {
     });
 
     await page.goto(url, {
-      waitUntil: 'networkidle',
+      waitUntil: 'domcontentloaded',
       timeout: 90000,
     });
 
