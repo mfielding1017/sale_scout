@@ -730,7 +730,8 @@ async function scrapeTarget(url) {
       `&tcin=${encodeURIComponent(tcin)}` +
       `&store_id=1771` +
       `&pricing_store_id=1771` +
-      `&has_pricing_store_id=true`;
+      `&has_pricing_store_id=true` +
+      `&has_financing_options=true`;
 
     const response = await fetch(redskyUrl, {
   headers: {
