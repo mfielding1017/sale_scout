@@ -756,32 +756,61 @@ async function scrapeTarget(url) {
 
     const currentPrice =
       parseFloat(priceData.current_retail) ||
-      parseFloat(priceData.formatted_current_price?.replace('$', ''));
+      parseFloat(
+        String(
+          priceData.formatted_current_price || ''
+        ).replace('$', '')
+      );
 
     const originalPrice =
       parseFloat(priceData.reg_retail) ||
-      parseFloat(priceData.formatted_comparison_price?.replace('$', ''));
+      parseFloat(
+        String(
+          priceData.formatted_comparison_price || ''
+        ).replace('$', '')
+      );
 
     const imageUrl =
       product?.item?.enrichment?.images?.primary_image_url ||
-      null;
+      '';
 
-console.log(
-  'TARGET IMAGE DEBUG:',
-  JSON.stringify(productData).slice(0, 5000)
-);
+    console.log(
+      'TARGET IMAGE URL:',
+      imageUrl
+    );
+
     return {
-      title: product.item?.product_description?.title || 'Target Product',
+      title:
+        product?.item?.product_description?.title ||
+        'Target Product',
+
       sku: tcin,
+
       retailer: 'Target',
+
       currentPrice: currentPrice || 0,
-      originalPrice: originalPrice || null,
-      originalPriceAvailable: !!originalPrice,
-      imageUrl,
-      source: 'target_redsky_api_v1',
+
+      originalPrice:
+        originalPrice &&
+        originalPrice > currentPrice
+          ? originalPrice
+          : null,
+
+      originalPriceAvailable:
+        Boolean(
+          originalPrice &&
+          originalPrice > currentPrice
+        ),
+
+      imageUrl: imageUrl || '',
+
+      source: 'target_redsky_api_v2',
     };
   } catch (error) {
-    console.error('TARGET SCRAPER ERROR:', error.message);
+    console.error(
+      'TARGET SCRAPER ERROR:',
+      error.message
+    );
 
     return {
       title: 'Target Product',
@@ -790,15 +819,13 @@ console.log(
       currentPrice: 0,
       originalPrice: null,
       originalPriceAvailable: false,
-      imageUrl:
-  productData.item?.enrichment?.images?.primary_image_url ||
-  productData.enrichment?.images?.primary_image_url ||
-  null,
+      imageUrl: '',
       source: 'target_redsky_api_failed',
       error: error.message,
     };
   }
-}app.get('/debug', (req, res) => {
+}
+app.get('/debug', (req, res) => {
   res.json({
     status: 'ok',
     version: 'stable_nike_links_verification',
