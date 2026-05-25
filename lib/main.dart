@@ -14,12 +14,55 @@ import 'firebase_options.dart';
 
 // NOTE:
 // This full main.dart keeps your current working Nike tracking flow,
-// keeps auto-scan paused, and adds the first cross-retailer deal section.
+// enables safe hourly auto-scans and keeps the cross-retailer deal section.
 // It calls:
 //   /product
 // then:
 //   /search-deals
 // and displays the top Google Shopping results under each tracked item.
+
+String decodeHtmlEntities(String input) {
+  var value = input;
+
+  final namedEntities = <String, String>{
+    '&amp;': '&',
+    '&quot;': '"',
+    '&#39;': "'",
+    '&apos;': "'",
+    '&lt;': '<',
+    '&gt;': '>',
+    '&trade;': '™',
+    '&reg;': '®',
+    '&copy;': '©',
+    '&nbsp;': ' ',
+  };
+
+  namedEntities.forEach((entity, replacement) {
+    value = value.replaceAll(entity, replacement);
+  });
+
+  value = value.replaceAllMapped(
+    RegExp(r'&#(\d+);'),
+    (match) {
+      final codePoint = int.tryParse(match.group(1) ?? '');
+      if (codePoint == null) return match.group(0) ?? '';
+      return String.fromCharCode(codePoint);
+    },
+  );
+
+  return value.replaceAll(RegExp(r'\s+'), ' ').trim();
+}
+
+String formatMoney(num value) {
+  final amount = value.toDouble();
+
+  if (amount == amount.roundToDouble()) {
+    return amount.toStringAsFixed(0);
+  }
+
+  return amount.toStringAsFixed(2);
+}
+
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -254,7 +297,7 @@ class _LoginPageState extends State<LoginPage> {
 
 class DealResult {
   final String title;
-  final int price;
+  final double price;
   final String source;
   final String link;
   final String thumbnail;
@@ -286,10 +329,10 @@ class DealResult {
     final rawSignals = json['verificationSignals'];
 
     return DealResult(
-      title: json['title']?.toString() ?? '',
+      title: decodeHtmlEntities(json['title']?.toString() ?? ''),
       price: rawPrice is num
-          ? rawPrice.round()
-          : int.tryParse((rawPrice ?? '0').toString()) ?? 0,
+          ? rawPrice.toDouble()
+          : double.tryParse((rawPrice ?? '0').toString()) ?? 0,
       source: json['source']?.toString() ?? '',
       link: json['link']?.toString() ?? '',
       thumbnail: json['thumbnail']?.toString() ?? '',
@@ -311,11 +354,11 @@ class ProductItem {
   final String title;
   final String sku;
   final String retailer;
-  final int currentPrice;
-  final int originalPrice;
+  final double currentPrice;
+  final double originalPrice;
   final bool originalPriceAvailable;
   final String imageUrl;
-  final int betterDealPrice;
+  final double betterDealPrice;
   final String betterDealStore;
   final int confidence;
   final String lastChecked;
@@ -372,14 +415,14 @@ class ProductItem {
   factory ProductItem.fromJson(Map<String, dynamic> json) {
     return ProductItem(
       url: json['url'] ?? '',
-      title: json['title'] ?? 'Unknown Product',
+      title: decodeHtmlEntities(json['title'] ?? 'Unknown Product'),
       sku: json['sku'] ?? '',
       retailer: json['retailer'] ?? 'Unknown',
-      currentPrice: (json['currentPrice'] ?? 0).round(),
-      originalPrice: (json['originalPrice'] ?? 0).round(),
+      currentPrice: (json['currentPrice'] ?? 0).toDouble(),
+      originalPrice: (json['originalPrice'] ?? 0).toDouble(),
       originalPriceAvailable: json['originalPriceAvailable'] ?? false,
       imageUrl: json['imageUrl'] ?? '',
-      betterDealPrice: (json['betterDealPrice'] ?? 0).round(),
+      betterDealPrice: (json['betterDealPrice'] ?? 0).toDouble(),
       betterDealStore: json['betterDealStore'] ?? 'Unknown',
       confidence: (json['confidence'] ?? 0).round(),
       lastChecked: json['lastChecked'] ?? 'Not checked yet',
@@ -390,13 +433,13 @@ class ProductItem {
           (entry) {
             if (entry is num) {
               return {
-                'price': entry.round(),
+                'price': entry.toDouble(),
                 'timestamp': DateTime.now().toIso8601String(),
               };
             }
 
             return {
-              'price': ((entry['price'] ?? 0) as num).round(),
+              'price': ((entry['price'] ?? 0) as num).toDouble(),
               'timestamp':
                   entry['timestamp'] ?? DateTime.now().toIso8601String(),
             };
@@ -434,12 +477,13 @@ class _HomePageState extends State<HomePage> {
   bool isRefreshing = false;
   bool apiScanInProgress = false;
   bool showDropAlert = false;
+  final Set<String> expandedDealKeys = <String>{};
 
   String plan = 'Scout';
   int itemLimit = 5;
 
   Timer? monitorTimer;
-  int countdown = 1800;
+  int countdown = 3600;
 
   String get uid => FirebaseAuth.instance.currentUser!.uid;
 
@@ -451,9 +495,7 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     loadUserData();
 
-    // Auto background scanning is temporarily disabled.
-    // This prevents repeated Nike scans and backend "Scanner busy" issues.
-    // startMonitoring();
+    startMonitoring();
   }
 
   @override
@@ -485,10 +527,9 @@ class _HomePageState extends State<HomePage> {
       });
 
       if (countdown <= 0) {
-        countdown = 1800;
+        countdown = 3600;
 
-        // Auto scan temporarily disabled.
-        // refreshPrices(autoScan: true);
+        refreshPrices(autoScan: true);
       }
     });
   }
@@ -638,13 +679,13 @@ class _HomePageState extends State<HomePage> {
         return null;
       }
 
-      final title = (data['title'] ?? '').toString().trim();
+      final title = decodeHtmlEntities((data['title'] ?? '').toString().trim());
       final retailer = (data['retailer'] ?? '').toString().trim();
       final currentPriceValue = data['currentPrice'];
 
       final newPrice = currentPriceValue is num
-          ? currentPriceValue.round()
-          : int.tryParse((currentPriceValue ?? '').toString()) ?? 0;
+          ? currentPriceValue.toDouble()
+          : double.tryParse((currentPriceValue ?? '').toString()) ?? 0;
 
       if (title.isEmpty ||
           title == 'Unknown Product' ||
@@ -683,12 +724,12 @@ class _HomePageState extends State<HomePage> {
         sku: sku,
         retailer: retailer,
         currentPrice: newPrice,
-        originalPrice: rawOriginal is num ? rawOriginal.round() : 0,
+        originalPrice: rawOriginal is num ? rawOriginal.toDouble() : 0,
         originalPriceAvailable: originalAvailable == true,
         imageUrl: data['imageUrl'] ?? '',
         betterDealPrice: cheapestDeal?.price ??
             (betterDeal is Map && betterDeal['price'] is num
-                ? (betterDeal['price'] as num).round()
+                ? (betterDeal['price'] as num).toDouble()
                 : newPrice),
         betterDealStore: cheapestDeal?.source ??
             (betterDeal is Map
@@ -710,7 +751,7 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  List<Map<String, dynamic>> createInitialHistory(int currentPrice) {
+  List<Map<String, dynamic>> createInitialHistory(double currentPrice) {
     return [
       {
         'price': currentPrice,
@@ -858,16 +899,16 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  int lowestPrice(ProductItem item) {
+  double lowestPrice(ProductItem item) {
     if (item.priceHistory.isEmpty) return item.currentPrice;
 
-    return item.priceHistory.map((entry) => entry['price'] as int).reduce(min);
+    return item.priceHistory.map((entry) => (entry['price'] as num).toDouble()).reduce(min);
   }
 
-  int highestPrice(ProductItem item) {
+  double highestPrice(ProductItem item) {
     if (item.priceHistory.isEmpty) return item.currentPrice;
 
-    return item.priceHistory.map((entry) => entry['price'] as int).reduce(max);
+    return item.priceHistory.map((entry) => (entry['price'] as num).toDouble()).reduce(max);
   }
 
   double averagePrice(ProductItem item) {
@@ -876,7 +917,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     final prices = item.priceHistory
-        .map((entry) => (entry['price'] as int).toDouble())
+        .map((entry) => (entry['price'] as num).toDouble())
         .toList();
 
     final total = prices.reduce((a, b) => a + b);
@@ -922,9 +963,9 @@ class _HomePageState extends State<HomePage> {
   String trendLabel(ProductItem item) {
     if (item.priceHistory.length < 2) return 'Tracking';
 
-    final last = item.priceHistory.last['price'] as int;
+    final last = (item.priceHistory.last['price'] as num).toDouble();
     final previous =
-        item.priceHistory[item.priceHistory.length - 2]['price'] as int;
+        (item.priceHistory[item.priceHistory.length - 2]['price'] as num).toDouble();
 
     if (last < previous) return 'Trending Down';
     if (last > previous) return 'Trending Up';
@@ -1061,7 +1102,7 @@ class _HomePageState extends State<HomePage> {
                     ),
                   ),
                   Text(
-                    'Auto scan paused',
+                    'Hourly monitoring active',
                     style: TextStyle(
                       color: cream.withOpacity(.68),
                       fontSize: isPhone ? 12 : 14,
@@ -1069,25 +1110,7 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ],
               ),
-              SizedBox(height: isPhone ? 10 : 17),
-              Text(
-                'Track prices across the internet',
-                style: TextStyle(
-                  color: cream,
-                  fontSize: isPhone ? 23 : 31,
-                  height: 1.05,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              SizedBox(height: isPhone ? 6 : 9),
-              Text(
-                'Paste a product URL and Sale Scout will monitor it for price drops.',
-                style: TextStyle(
-                  color: cream.withOpacity(.72),
-                  fontSize: isPhone ? 13 : 16,
-                ),
-              ),
-              SizedBox(height: isPhone ? 12 : 21),
+              SizedBox(height: isPhone ? 8 : 12),
               TextField(
                 controller: urlController,
                 style: TextStyle(color: cream, fontSize: isPhone ? 14 : 17),
@@ -1118,7 +1141,7 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
               ),
-              SizedBox(height: isPhone ? 10 : 15),
+              SizedBox(height: 6),
               SizedBox(
                 width: double.infinity,
                 height: isPhone ? 48 : 56,
@@ -1152,7 +1175,7 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
               ),
-              SizedBox(height: isPhone ? 8 : 11),
+              SizedBox(height: 4),
               SizedBox(
                 width: double.infinity,
                 height: isPhone ? 44 : 50,
@@ -1176,7 +1199,7 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
               ),
-              SizedBox(height: isPhone ? 12 : 23),
+              SizedBox(height: isPhone ? 8 : 14),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -1198,7 +1221,7 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ],
               ),
-              SizedBox(height: isPhone ? 8 : 13),
+              SizedBox(height: 6),
               Expanded(
                 child: trackedItems.isEmpty
                     ? Center(
@@ -1246,8 +1269,8 @@ class _HomePageState extends State<HomePage> {
                           final item = trackedItems[index];
 
                           return Container(
-                            margin: const EdgeInsets.only(bottom: 17),
-                            padding: EdgeInsets.all(isPhone ? 13 : 17),
+                            margin: const EdgeInsets.only(bottom: 10),
+                            padding: EdgeInsets.all(isPhone ? 10 : 14),
                             decoration: BoxDecoration(
                               color: cardGreen,
                               borderRadius: BorderRadius.circular(22),
@@ -1278,7 +1301,7 @@ class _HomePageState extends State<HomePage> {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _productImage(item, 98),
+        _productImage(item, 86),
         const SizedBox(width: 16),
         Expanded(child: _productDetails(item)),
         IconButton(
@@ -1295,7 +1318,7 @@ class _HomePageState extends State<HomePage> {
       children: [
         Row(
           children: [
-            _productImage(item, 74),
+            _productImage(item, 64),
             const SizedBox(width: 12),
             Expanded(
               child: Text(
@@ -1369,7 +1392,7 @@ class _HomePageState extends State<HomePage> {
         ),
         const SizedBox(height: 7),
         Text(
-          'Current Price: \$${item.currentPrice}',
+          'Current Price: \$${formatMoney(item.currentPrice)}',
           style: TextStyle(
             color: lightGreen,
             fontSize: compact ? 18 : 21,
@@ -1378,7 +1401,7 @@ class _HomePageState extends State<HomePage> {
         ),
         Text(
           item.originalPriceAvailable
-              ? 'Original Price: \$${item.originalPrice}'
+              ? 'Original Price: \$${formatMoney(item.originalPrice)}'
               : 'Original Price: Not available',
           style: TextStyle(
             color: cream.withOpacity(.82),
@@ -1387,7 +1410,7 @@ class _HomePageState extends State<HomePage> {
         ),
         Text(
           item.originalPriceAvailable
-              ? 'Savings: \$${item.originalPrice - item.currentPrice}'
+              ? 'Savings: \$${formatMoney(item.originalPrice - item.currentPrice)}'
               : 'Savings: Tracking...',
           style: TextStyle(
             color: gold,
@@ -1395,9 +1418,9 @@ class _HomePageState extends State<HomePage> {
             fontWeight: FontWeight.bold,
           ),
         ),
-        const SizedBox(height: 10),
+        const SizedBox(height: 7),
         _dealResultsSection(item),
-        const SizedBox(height: 9),
+        const SizedBox(height: 7),
         Wrap(
           spacing: 12,
           runSpacing: 6,
@@ -1419,21 +1442,21 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
             Text(
-              'Low: \$${lowestPrice(item)}',
+              'Low: \$${formatMoney(lowestPrice(item))}',
               style: TextStyle(
                 color: cream.withOpacity(.68),
                 fontSize: 13,
               ),
             ),
             Text(
-              'High: \$${highestPrice(item)}',
+              'High: \$${formatMoney(highestPrice(item))}',
               style: TextStyle(
                 color: cream.withOpacity(.68),
                 fontSize: 13,
               ),
             ),
             Text(
-              'Avg: \$${averagePrice(item).round()}',
+              'Avg: \$${formatMoney(averagePrice(item))}',
               style: TextStyle(
                 color: cream.withOpacity(.68),
                 fontSize: 13,
@@ -1452,7 +1475,7 @@ class _HomePageState extends State<HomePage> {
         const SizedBox(height: 9),
         if (item.priceHistory.isNotEmpty)
           SizedBox(
-            height: compact ? 44 : 52,
+            height: compact ? 32 : 40,
             child: LineChart(
               LineChartData(
                 minY: lowestPrice(item).toDouble() - 5,
@@ -1468,7 +1491,7 @@ class _HomePageState extends State<HomePage> {
                         .map(
                           (entry) => FlSpot(
                             entry.key.toDouble(),
-                            (entry.value['price'] as int).toDouble(),
+                            (entry.value['price'] as num).toDouble(),
                           ),
                         )
                         .toList(),
@@ -1547,7 +1570,7 @@ class _HomePageState extends State<HomePage> {
           border: Border.all(color: cream.withOpacity(.12)),
         ),
         child: Text(
-          'Cross-retailer deals: Searching soon...',
+          'Cross-retailer deals: Searching...' ,
           style: TextStyle(
             color: cream.withOpacity(.62),
             fontSize: 12,
@@ -1564,120 +1587,157 @@ class _HomePageState extends State<HomePage> {
         item.dealResults.where((deal) => deal.confidence < 80).toList();
 
     Widget dealRow(DealResult deal) {
+      final dealKey =
+          '${deal.source}|${deal.link}|${deal.title}|${deal.price}';
+      final expanded = expandedDealKeys.contains(dealKey);
       final cheaper = deal.price < item.currentPrice;
 
       return Padding(
-        padding: const EdgeInsets.only(bottom: 8),
-        child: Container(
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.03),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: cream.withOpacity(.08)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Icon(
-                    cheaper ? Icons.local_offer : Icons.storefront,
-                    size: 16,
-                    color: cheaper ? lightGreen : cream.withOpacity(.6),
-                  ),
-                  const SizedBox(width: 7),
-                  Expanded(
-                    child: Text(
-                      '${deal.source}: \$${deal.price} • ${deal.confidence}% match',
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: cheaper ? lightGreen : cream.withOpacity(.84),
-                        fontSize: 13,
-                        fontWeight:
-                            cheaper ? FontWeight.bold : FontWeight.w500,
+        padding: const EdgeInsets.only(bottom: 6),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(11),
+          onTap: () {
+            setState(() {
+              if (expanded) {
+                expandedDealKeys.remove(dealKey);
+              } else {
+                expandedDealKeys.add(dealKey);
+              }
+            });
+          },
+          child: Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: 8,
+              vertical: 7,
+            ),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.03),
+              borderRadius: BorderRadius.circular(11),
+              border: Border.all(color: cream.withOpacity(.08)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      cheaper ? Icons.local_offer : Icons.storefront,
+                      size: 15,
+                      color: cheaper ? lightGreen : cream.withOpacity(.6),
+                    ),
+                    const SizedBox(width: 7),
+                    Expanded(
+                      child: Text(
+                        '${deal.source} • \$${formatMoney(deal.price)} • ${deal.confidence}%',
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color:
+                              cheaper ? lightGreen : cream.withOpacity(.84),
+                          fontSize: 12,
+                          fontWeight:
+                              cheaper ? FontWeight.bold : FontWeight.w600,
+                        ),
                       ),
                     ),
-                  ),
-                ],
-              ),
-              if (deal.title.isNotEmpty) ...[
-                const SizedBox(height: 4),
-                Text(
-                  deal.title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: cream.withOpacity(.58),
-                    fontSize: 11,
-                    height: 1.15,
-                  ),
-                ),
-              ],
-              _verificationSignalsChips(deal),
-              const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: () => openDealLink(deal.link),
-                  icon: const Icon(Icons.open_in_new, size: 16),
-                  label: const Text('Open Deal'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: lightGreen,
-                    foregroundColor: green,
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10),
+                    Icon(
+                      expanded
+                          ? Icons.keyboard_arrow_up
+                          : Icons.keyboard_arrow_down,
+                      color: cream.withOpacity(.55),
+                      size: 18,
                     ),
-                  ),
+                    const SizedBox(width: 4),
+                    TextButton(
+                      onPressed: () => openDealLink(deal.link),
+                      style: TextButton.styleFrom(
+                        foregroundColor: green,
+                        backgroundColor: lightGreen,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 6,
+                        ),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(9),
+                        ),
+                      ),
+                      child: const Text(
+                        'Open',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-              ),
-            ],
+                if (expanded) ...[
+                  if (deal.title.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      deal.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: cream.withOpacity(.58),
+                        fontSize: 11,
+                        height: 1.15,
+                      ),
+                    ),
+                  ],
+                  _verificationSignalsChips(deal),
+                ],
+              ],
+            ),
           ),
         ),
       );
     }
 
+    final shownDeals = [
+      ...bestMatches.take(4),
+      ...possibleMatches.take(bestMatches.isEmpty ? 3 : 2),
+    ];
+
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(10),
+      padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
-        color: fieldGreen.withOpacity(.85),
+        color: fieldGreen.withOpacity(.78),
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: lightGreen.withOpacity(.28)),
+        border: Border.all(color: lightGreen.withOpacity(.20)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (bestMatches.isNotEmpty) ...[
-            Text(
-              'Best Matches',
-              style: TextStyle(
-                color: lightGreen,
-                fontSize: 13,
-                fontWeight: FontWeight.bold,
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Retailer matches',
+                style: TextStyle(
+                  color: lightGreen,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
-            ),
-            const SizedBox(height: 7),
-            ...bestMatches.take(4).map(dealRow),
-          ],
-          if (possibleMatches.isNotEmpty) ...[
-            if (bestMatches.isNotEmpty) const SizedBox(height: 6),
-            Text(
-              'Possible Matches',
-              style: TextStyle(
-                color: cream.withOpacity(.75),
-                fontSize: 12,
-                fontWeight: FontWeight.bold,
+              Text(
+                '${item.dealResults.length} found',
+                style: TextStyle(
+                  color: cream.withOpacity(.55),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
-            ),
-            const SizedBox(height: 7),
-            ...possibleMatches.take(4).map(dealRow),
-          ],
+            ],
+          ),
+          const SizedBox(height: 6),
+          ...shownDeals.map(dealRow),
         ],
       ),
     );
   }
-
   List<String> _signalList(Map<String, dynamic> signals, String key) {
     final raw = signals[key];
 
