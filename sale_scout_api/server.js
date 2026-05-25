@@ -942,6 +942,35 @@ app.get('/debug', (req, res) => {
     targetEnabled: false,
   });
 });
+
+app.get('/debug-target-url', async (req, res) => {
+  const url = req.query.url;
+
+  if (!url) {
+    return res.status(400).json({
+      error: 'Missing Target URL',
+    });
+  }
+
+  try {
+    const result = await scrapeTarget(url);
+
+    return res.json({
+      status: 'ok',
+      route: 'debug-target-url',
+      targetEnabledInApp: false,
+      result,
+    });
+  } catch (error) {
+    console.error('DEBUG TARGET ERROR:', error.message);
+
+    return res.status(500).json({
+      status: 'error',
+      route: 'debug-target-url',
+      error: error.message,
+    });
+  }
+});
 app.listen(PORT, () => {
   console.log(
     `Server running on port ${PORT}`
