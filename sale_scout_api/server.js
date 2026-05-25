@@ -733,12 +733,15 @@ async function scrapeTarget(url) {
       `&has_pricing_store_id=true`;
 
     const response = await fetch(redskyUrl, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-        Accept: 'application/json',
-      },
-    });
+  headers: {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    Accept: '*/*',
+    Referer: 'https://www.target.com/',
+    Origin: 'https://www.target.com',
+    'Accept-Language': 'en-US,en;q=0.9',
+  },
+});
 
     if (!response.ok) {
       throw new Error(`Target API failed: ${response.status}`);
