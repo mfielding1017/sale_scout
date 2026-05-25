@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'dart:html' as html;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -478,6 +479,7 @@ class _HomePageState extends State<HomePage> {
   bool apiScanInProgress = false;
   bool showDropAlert = false;
   final Set<String> expandedDealKeys = <String>{};
+  List<Map<String, dynamic>> alertHistory = [];
 
   String plan = 'Scout';
   int itemLimit = 5;
@@ -496,6 +498,7 @@ class _HomePageState extends State<HomePage> {
     loadUserData();
 
     startMonitoring();
+    requestBrowserNotificationPermission();
   }
 
   @override
@@ -572,6 +575,11 @@ class _HomePageState extends State<HomePage> {
       plan = data['plan'] ?? 'Scout';
       itemLimit = data['itemLimit'] ?? 5;
       trackedItems = items.map((item) => ProductItem.fromJson(item)).toList();
+      alertHistory = List<Map<String, dynamic>>.from(
+        (data['alertHistory'] ?? []).map(
+          (alert) => Map<String, dynamic>.from(alert),
+        ),
+      );
     });
   }
 
@@ -582,6 +590,7 @@ class _HomePageState extends State<HomePage> {
       'itemLimit': itemLimit,
       'updatedAt': FieldValue.serverTimestamp(),
       'trackedItems': trackedItems.map((item) => item.toJson()).toList(),
+      'alertHistory': alertHistory,
     }, SetOptions(merge: true));
   }
 
@@ -825,6 +834,7 @@ class _HomePageState extends State<HomePage> {
 
         if (updated != null && updated.priceDropped) {
           anyDrop = true;
+          addPriceDropAlert(oldItem: item, newItem: updated);
         }
 
         updatedItems.add(updated ?? item);
@@ -868,6 +878,266 @@ class _HomePageState extends State<HomePage> {
     await saveUserData();
   }
 
+  Future<void> requestBrowserNotificationPermission() async {
+    try {
+      if (html.Notification.supported &&
+          html.Notification.permission == 'default') {
+        await html.Notification.requestPermission();
+      }
+    } catch (e) {
+      print('BROWSER NOTIFICATION PERMISSION ERROR: $e');
+    }
+  }
+
+  void sendBrowserPriceDropNotification({
+    required ProductItem oldItem,
+    required ProductItem newItem,
+  }) {
+    try {
+      if (!html.Notification.supported) return;
+      if (html.Notification.permission != 'granted') return;
+
+      final savings = oldItem.currentPrice - newItem.currentPrice;
+
+      html.Notification(
+        'Sale Scout Price Drop',
+        body:
+            '${newItem.title} dropped from \$${formatMoney(oldItem.currentPrice)} to \$${formatMoney(newItem.currentPrice)}. Saved \$${formatMoney(savings)}.',
+        icon: newItem.imageUrl.isNotEmpty ? newItem.imageUrl : null,
+      );
+    } catch (e) {
+      print('BROWSER NOTIFICATION ERROR: $e');
+    }
+  }
+
+  void addPriceDropAlert({
+    required ProductItem oldItem,
+    required ProductItem newItem,
+  }) {
+    final alert = {
+      'id': '${DateTime.now().millisecondsSinceEpoch}_${oldItem.sku}_${oldItem.url}',
+      'title': newItem.title,
+      'retailer': newItem.retailer,
+      'oldPrice': oldItem.currentPrice,
+      'newPrice': newItem.currentPrice,
+      'savings': oldItem.currentPrice - newItem.currentPrice,
+      'url': newItem.url,
+      'timestamp': DateTime.now().toIso8601String(),
+      'read': false,
+    };
+
+    alertHistory.insert(0, alert);
+
+    sendBrowserPriceDropNotification(oldItem: oldItem, newItem: newItem);
+
+    if (alertHistory.length > 25) {
+      alertHistory = alertHistory.take(25).toList();
+    }
+  }
+
+  int unreadAlertCount() {
+    return alertHistory.where((alert) => alert['read'] != true).length;
+  }
+
+  String formatAlertTime(String value) {
+    try {
+      final date = DateTime.parse(value).toLocal();
+      return date.toString().substring(0, 16);
+    } catch (_) {
+      return 'Recently';
+    }
+  }
+
+  Future<void> clearAlerts() async {
+    if (!mounted) return;
+
+    setState(() {
+      alertHistory = [];
+    });
+
+    await saveUserData();
+  }
+
+  Future<void> markAlertsRead() async {
+    if (alertHistory.isEmpty) return;
+
+    setState(() {
+      alertHistory = alertHistory
+          .map(
+            (alert) => {
+              ...alert,
+              'read': true,
+            },
+          )
+          .toList();
+    });
+
+    await saveUserData();
+  }
+
+  void showAlertsSheet() {
+    markAlertsRead();
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: cardGreen,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (_) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 18),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.notifications_active, color: lightGreen),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Price Drop Alerts',
+                        style: TextStyle(
+                          color: cream,
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    if (alertHistory.isNotEmpty)
+                      TextButton(
+                        onPressed: () {
+                          Navigator.pop(context);
+                          clearAlerts();
+                        },
+                        child: Text(
+                          'Clear',
+                          style: TextStyle(color: gold),
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                if (alertHistory.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 24),
+                    child: Text(
+                      'No price drops yet. Sale Scout will add alerts here when tracked items fall in price.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: cream.withOpacity(.68),
+                        fontSize: 14,
+                      ),
+                    ),
+                  )
+                else
+                  Flexible(
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: alertHistory.length,
+                      itemBuilder: (context, index) {
+                        final alert = alertHistory[index];
+                        final title = decodeHtmlEntities(
+                          alert['title']?.toString() ?? 'Tracked item',
+                        );
+                        final retailer =
+                            alert['retailer']?.toString() ?? 'Retailer';
+                        final oldPrice =
+                            (alert['oldPrice'] ?? 0) is num
+                                ? (alert['oldPrice'] as num).toDouble()
+                                : double.tryParse(
+                                      (alert['oldPrice'] ?? '0').toString(),
+                                    ) ??
+                                    0;
+                        final newPrice =
+                            (alert['newPrice'] ?? 0) is num
+                                ? (alert['newPrice'] as num).toDouble()
+                                : double.tryParse(
+                                      (alert['newPrice'] ?? '0').toString(),
+                                    ) ??
+                                    0;
+                        final savings =
+                            (alert['savings'] ?? (oldPrice - newPrice)) is num
+                                ? (alert['savings'] as num).toDouble()
+                                : oldPrice - newPrice;
+
+                        return Container(
+                          margin: const EdgeInsets.only(bottom: 9),
+                          padding: const EdgeInsets.all(11),
+                          decoration: BoxDecoration(
+                            color: fieldGreen.withOpacity(.85),
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(
+                              color: lightGreen.withOpacity(.22),
+                            ),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Icon(
+                                    Icons.trending_down,
+                                    color: lightGreen,
+                                    size: 18,
+                                  ),
+                                  const SizedBox(width: 7),
+                                  Expanded(
+                                    child: Text(
+                                      '$retailer price drop',
+                                      style: TextStyle(
+                                        color: lightGreen,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 13,
+                                      ),
+                                    ),
+                                  ),
+                                  Text(
+                                    formatAlertTime(
+                                      alert['timestamp']?.toString() ?? '',
+                                    ),
+                                    style: TextStyle(
+                                      color: cream.withOpacity(.45),
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                title,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: cream,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13,
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                '\$${formatMoney(oldPrice)} → \$${formatMoney(newPrice)}  •  Saved \$${formatMoney(savings)}',
+                                style: TextStyle(
+                                  color: gold,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   void showLimitDialog() {
     showDialog(
       context: context,
@@ -903,6 +1173,38 @@ class _HomePageState extends State<HomePage> {
     if (item.priceHistory.isEmpty) return item.currentPrice;
 
     return item.priceHistory.map((entry) => (entry['price'] as num).toDouble()).reduce(min);
+  }
+
+  double bestCurrentMarketPrice(ProductItem item) {
+    final marketPrices = <double>[item.currentPrice];
+
+    for (final deal in item.dealResults) {
+      if (deal.price > 0) {
+        marketPrices.add(deal.price);
+      }
+    }
+
+    return marketPrices.reduce(min);
+  }
+
+  String bestCurrentMarketStore(ProductItem item) {
+    final bestPrice = bestCurrentMarketPrice(item);
+
+    if ((item.currentPrice - bestPrice).abs() < 0.01) {
+      return item.retailer;
+    }
+
+    for (final deal in item.dealResults) {
+      if ((deal.price - bestPrice).abs() < 0.01) {
+        return deal.source.isNotEmpty ? deal.source : 'Retailer';
+      }
+    }
+
+    return item.retailer;
+  }
+
+  bool hasBetterMarketDeal(ProductItem item) {
+    return bestCurrentMarketPrice(item) < item.currentPrice;
   }
 
   double highestPrice(ProductItem item) {
@@ -1110,6 +1412,51 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ],
               ),
+              SizedBox(height: 6),
+              if (alertHistory.isNotEmpty)
+                InkWell(
+                  borderRadius: BorderRadius.circular(16),
+                  onTap: showAlertsSheet,
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 11,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: fieldGreen.withOpacity(.88),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: lightGreen.withOpacity(.24)),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.notifications_active,
+                          color: lightGreen,
+                          size: 18,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            unreadAlertCount() > 0
+                                ? '${unreadAlertCount()} new price-drop alert${unreadAlertCount() == 1 ? '' : 's'}'
+                                : '${alertHistory.length} saved price-drop alert${alertHistory.length == 1 ? '' : 's'}',
+                            style: TextStyle(
+                              color: cream,
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                        Icon(
+                          Icons.keyboard_arrow_up,
+                          color: cream.withOpacity(.55),
+                          size: 18,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               SizedBox(height: isPhone ? 8 : 12),
               TextField(
                 controller: urlController,
@@ -1417,6 +1764,35 @@ class _HomePageState extends State<HomePage> {
             fontSize: compact ? 15 : 17,
             fontWeight: FontWeight.bold,
           ),
+        ),
+        const SizedBox(height: 5),
+        Wrap(
+          spacing: 7,
+          runSpacing: 6,
+          children: [
+            _badge(
+              'Lowest ${item.retailer} Seen: \$${formatMoney(lowestPrice(item))}',
+              fieldGreen,
+              cream,
+            ),
+            _badge(
+              'Best Market: \$${formatMoney(bestCurrentMarketPrice(item))} at ${bestCurrentMarketStore(item)}',
+              hasBetterMarketDeal(item) ? lightGreen : fieldGreen,
+              hasBetterMarketDeal(item) ? green : cream,
+            ),
+            if (hasBetterMarketDeal(item))
+              _badge(
+                '💸 Better deal found',
+                lightGreen,
+                green,
+              )
+            else if ((item.currentPrice - lowestPrice(item)).abs() < 0.01)
+              _badge(
+                '🔥 Lowest ${item.retailer} price we’ve seen',
+                lightGreen,
+                green,
+              ),
+          ],
         ),
         const SizedBox(height: 7),
         _dealResultsSection(item),
