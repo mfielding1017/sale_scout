@@ -786,7 +786,10 @@ async function scrapeTarget(url) {
       currentPrice: 0,
       originalPrice: null,
       originalPriceAvailable: false,
-      imageUrl: null,
+      imageUrl:
+  productData.item?.enrichment?.images?.primary_image_url ||
+  productData.enrichment?.images?.primary_image_url ||
+  null,
       source: 'target_redsky_api_failed',
       error: error.message,
     };
