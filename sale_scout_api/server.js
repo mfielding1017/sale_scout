@@ -933,7 +933,15 @@ async function scrapeTarget(url) {
     }
   }
 }
-
+app.get('/debug', (req, res) => {
+  res.json({
+    status: 'ok',
+    version: 'stable_nike_links_verification',
+    nikeProductEndpoint: true,
+    searchDealsEndpoint: true,
+    targetEnabled: false,
+  });
+});
 app.listen(PORT, () => {
   console.log(
     `Server running on port ${PORT}`
