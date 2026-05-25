@@ -1467,6 +1467,46 @@ app.get('/debug-target-price-keys', async (req, res) => {
     }
   }
 });
+app.get('/debug-target-redsky', async (req, res) => {
+  const tcin = req.query.tcin || '94784166';
+
+  try {
+    const redskyUrl =
+      `https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1` +
+      `?key=9f36aeafbe60771e321a7cc95a78140772ab3e96` +
+      `&tcin=${encodeURIComponent(tcin)}` +
+      `&store_id=1771` +
+      `&pricing_store_id=1771` +
+      `&has_pricing_store_id=true` +
+      `&has_financing_options=true`;
+
+    const response = await fetch(redskyUrl, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+        Accept: 'application/json',
+      },
+    });
+
+    const text = await response.text();
+
+    return res.json({
+      status: 'ok',
+      route: 'debug-target-redsky',
+      httpStatus: response.status,
+      includesPrice: text.toLowerCase().includes('price'),
+      includesCurrentRetail: text.toLowerCase().includes('current_retail'),
+      includesTCIN: text.includes(tcin),
+      sample: text.slice(0, 3000),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      status: 'error',
+      route: 'debug-target-redsky',
+      error: error.message,
+    });
+  }
+});
 app.listen(PORT, () => {
   console.log(
     `Server running on port ${PORT}`
