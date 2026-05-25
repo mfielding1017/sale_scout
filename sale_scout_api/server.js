@@ -766,6 +766,10 @@ async function scrapeTarget(url) {
       product?.item?.enrichment?.images?.primary_image_url ||
       null;
 
+console.log(
+  'TARGET IMAGE DEBUG:',
+  JSON.stringify(productData).slice(0, 5000)
+);
     return {
       title: product.item?.product_description?.title || 'Target Product',
       sku: tcin,
