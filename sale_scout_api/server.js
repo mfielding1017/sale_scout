@@ -30,13 +30,11 @@ app.get('/product', async (req, res) => {
   try {
     let product;
 
-    if (url.includes('target.com')) {
-      product = await scrapeTarget(url);
-    } else if (url.includes('nike.com')) {
+    if (url.includes('nike.com')) {
       product = await scrapeNike(url);
     } else {
       return res.status(400).json({
-        error: 'Unsupported retailer',
+        error: 'Unsupported retailer for now',
       });
     }
 
