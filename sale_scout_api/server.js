@@ -1,1425 +1,1826 @@
-const express = require('express');
-const cors = require('cors');
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
 
-process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:url_launcher/url_launcher.dart';
 
-const { chromium } = require('playwright');
+import 'firebase_options.dart';
 
-const app = express();
-app.use(cors());
+// NOTE:
+// This full main.dart keeps your current working Nike tracking flow,
+// keeps auto-scan paused, and adds the first cross-retailer deal section.
+// It calls:
+//   /product
+// then:
+//   /search-deals
+// and displays the top Google Shopping results under each tracked item.
 
-const PORT = process.env.PORT || 3000;
+String decodeHtmlEntities(String input) {
+  var value = input;
 
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', message: 'Sale Scout API Running' });
-});
+  final namedEntities = <String, String>{
+    '&amp;': '&',
+    '&quot;': '"',
+    '&#39;': "'",
+    '&apos;': "'",
+    '&lt;': '<',
+    '&gt;': '>',
+    '&trade;': '™',
+    '&reg;': '®',
+    '&copy;': '©',
+    '&nbsp;': ' ',
+  };
 
-app.get('/health', (req, res) => {
-  res.json({ status: 'healthy' });
-});
-
-app.get('/product', async (req, res) => {
-  const url = req.query.url;
-
-  if (!url) {
-    return res.status(400).json({
-      error: 'Missing product URL',
-    });
-  }
-
-  try {
-    let product;
-
-    if (url.includes('nike.com')) {
-  product = await scrapeNike(url);
-} else if (url.includes('target.com')) {
-  product = await scrapeTarget(url);
-} else {
-  return res.status(400).json({
-    error: 'Unsupported retailer for now',
+  namedEntities.forEach((entity, replacement) {
+    value = value.replaceAll(entity, replacement);
   });
+
+  value = value.replaceAllMapped(
+    RegExp(r'&#(\d+);'),
+    (match) {
+      final codePoint = int.tryParse(match.group(1) ?? '');
+      if (codePoint == null) return match.group(0) ?? '';
+      return String.fromCharCode(codePoint);
+    },
+  );
+
+  return value.replaceAll(RegExp(r'\s+'), ' ').trim();
 }
 
-    return res.json(product);
-  } catch (error) {
-    console.error('PRODUCT ERROR:', error.message);
+String formatMoney(num value) {
+  final amount = value.toDouble();
 
-    return res.status(500).json({
-      error: 'Failed to fetch product',
-      details: error.message,
-    });
-  }
-});
-
-app.get('/search-deals', async (req, res) => {
-  const q = req.query.q;
-
-  if (!q) {
-    return res.status(400).json({
-      error: 'Missing search query',
-    });
+  if (amount == amount.roundToDouble()) {
+    return amount.toStringAsFixed(0);
   }
 
-  try {
-    const apiKey = process.env.SERPAPI_KEY;
+  return amount.toStringAsFixed(2);
+}
 
-    if (!apiKey) {
-      return res.status(500).json({
-        error: 'SERPAPI_KEY missing from environment variables',
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
+
+  runApp(const SaleScoutApp());
+}
+
+class SaleScoutApp extends StatelessWidget {
+  const SaleScoutApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Sale Scout',
+      theme: ThemeData.dark(),
+      home: const AuthGate(),
+    );
+  }
+}
+
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+
+        if (snapshot.hasData) return const HomePage();
+
+        return const LoginPage();
+      },
+    );
+  }
+}
+
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final emailController = TextEditingController();
+  final passwordController = TextEditingController();
+
+  bool isLogin = true;
+  bool isLoading = false;
+  String errorMessage = '';
+
+  final Color cream = const Color(0xFFF0E4C5);
+  final Color green = const Color(0xFF0B1A13);
+  final Color lightGreen = const Color(0xFFA7C97A);
+  final Color fieldGreen = const Color(0xFF102219);
+
+  Future<void> submit() async {
+    setState(() {
+      isLoading = true;
+      errorMessage = '';
+    });
+
+    try {
+      if (isLogin) {
+        await FirebaseAuth.instance.signInWithEmailAndPassword(
+          email: emailController.text.trim(),
+          password: passwordController.text.trim(),
+        );
+      } else {
+        final credential =
+            await FirebaseAuth.instance.createUserWithEmailAndPassword(
+          email: emailController.text.trim(),
+          password: passwordController.text.trim(),
+        );
+
+        await FirebaseFirestore.instance
+            .collection('users')
+            .doc(credential.user!.uid)
+            .set({
+          'email': credential.user!.email,
+          'plan': 'Scout',
+          'itemLimit': 5,
+          'createdAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+          'trackedItems': [],
+        }, SetOptions(merge: true));
+      }
+    } on FirebaseAuthException catch (e) {
+      setState(() {
+        errorMessage = e.message ?? 'Something went wrong.';
       });
     }
 
-    const serpUrl =
-      `https://serpapi.com/search.json` +
-      `?engine=google_shopping` +
-      `&q=${encodeURIComponent(q)}` +
-      `&api_key=${apiKey}`;
-
-    const response = await fetch(serpUrl);
-    const data = await response.json();
-
-    const rawResults = data.shopping_results || [];
-    const retailerMap = {};
-
-    for (const item of rawResults) {
-      const title = item.title || '';
-      const rawSource = item.source || 'Unknown';
-
-      const sourceKey = normalizeRetailerSource(rawSource);
-      const displaySource = cleanRetailerDisplayName(rawSource);
-
-      const extractedPrice =
-        typeof item.extracted_price === 'number'
-          ? item.extracted_price
-          : typeof item.price === 'number'
-            ? item.price
-            : parseFloat(
-                String(item.price || '')
-                  .replace('$', '')
-                  .replace(',', '')
-              );
-
-      if (!title || !displaySource || !sourceKey || !extractedPrice) {
-        continue;
-      }
-
-      const confidence = smartMatchConfidence(
-        q,
-        title,
-        displaySource,
-        extractedPrice
-      );
-
-      const suspiciousLowPrice = extractedPrice < 35 && confidence < 90;
-      const suspiciousHighPrice = extractedPrice > 350 && confidence < 90;
-
-      if (suspiciousLowPrice || suspiciousHighPrice) continue;
-      if (confidence < 35) continue;
-
-      const fallbackSearchLink =
-        `https://www.google.com/search?tbm=shop&q=${encodeURIComponent(
-          `${title} ${displaySource}`
-        )}`;
-
-      const querySku = extractSkuFromText(q);
-      const titleSku = extractSkuFromText(title);
-      const titleText = title.toLowerCase();
-      const queryText = q.toLowerCase();
-
-      const verificationSignals = {
-        positive: [],
-        warnings: [],
-      };
-
-      if (querySku && titleSku && querySku === titleSku) {
-        verificationSignals.positive.push('SKU match');
-      }
-
-      if (titleText.includes('nike')) {
-        verificationSignals.positive.push('Brand match');
-      }
-
-      if (titleText.includes('dunk')) {
-        verificationSignals.positive.push('Model match');
-      }
-
-      if (titleText.includes('low')) {
-        verificationSignals.positive.push('Low-top match');
-      }
-
-      if (
-        titleText.includes('men') ||
-        titleText.includes("men's") ||
-        titleText.includes('mens')
-      ) {
-        verificationSignals.positive.push("Men's match");
-      }
-
-      if (confidence >= 80) {
-        verificationSignals.positive.push('High-confidence match');
-      }
-
-      if (!querySku || !titleSku || querySku !== titleSku) {
-        verificationSignals.warnings.push('SKU not confirmed');
-      }
-
-      if (confidence < 60) {
-        verificationSignals.warnings.push('Low-confidence match');
-      }
-
-      if (
-        titleText.includes('kids') ||
-        titleText.includes('grade school') ||
-        titleText.includes('gs') ||
-        titleText.includes('youth') ||
-        titleText.includes('toddler') ||
-        titleText.includes('baby')
-      ) {
-        verificationSignals.warnings.push('Age group mismatch risk');
-      }
-
-      if (
-        titleText.includes('women') &&
-        (queryText.includes('men') || queryText.includes("men's"))
-      ) {
-        verificationSignals.warnings.push('Gender mismatch risk');
-      }
-
-      if (
-        titleText.includes('used') ||
-        titleText.includes('pre-owned') ||
-        titleText.includes('preowned')
-      ) {
-        verificationSignals.warnings.push('Condition mismatch risk');
-      }
-
-      const deal = {
-        title,
-        price: Math.round(extractedPrice),
-        source: displaySource,
-        link:
-          item.link ||
-          item.product_link ||
-          item.productLink ||
-          item.serpapi_link ||
-          item.serpapiLink ||
-          item.serpapi_product_api ||
-          fallbackSearchLink,
-        thumbnail: item.thumbnail || '',
-        confidence,
-        verificationSignals,
-      };
-
-      const existing = retailerMap[sourceKey];
-
-      if (
-        !existing ||
-        deal.confidence > existing.confidence ||
-        (deal.confidence === existing.confidence && deal.price < existing.price)
-      ) {
-        retailerMap[sourceKey] = deal;
-      }
-    }
-
-    const results = Object.values(retailerMap)
-      .sort((a, b) => {
-        if (b.confidence !== a.confidence) return b.confidence - a.confidence;
-        return a.price - b.price;
-      })
-      .slice(0, 12);
-
-    return res.json({
-      query: q,
-      resultCount: results.length,
-      source: 'target_support_v1',
-      results,
-    });
-  } catch (error) {
-    console.error('SEARCH DEALS ERROR:', error.message);
-
-    return res.status(500).json({
-      error: 'Failed to search deals',
-      details: error.message,
+    setState(() {
+      isLoading = false;
     });
   }
-});
 
-function normalizeRetailerSource(source) {
-  const cleaned = String(source || '')
-    .toLowerCase()
-    .replace(/\.com/g, '')
-    .replace(/[^a-z0-9]/g, '')
-    .trim();
+  @override
+  Widget build(BuildContext context) {
+    final isPhone = MediaQuery.of(context).size.width < 600;
 
-  if (cleaned.includes('nike')) return 'nike';
-  if (cleaned.includes('target')) return 'target';
-  if (cleaned.includes('walmart')) return 'walmart';
-  if (cleaned.includes('costco')) return 'costco';
-  if (cleaned.includes('finishline')) return 'finishline';
-
-  if (cleaned.includes('dicks') || cleaned.includes('dickssportinggoods')) {
-    return 'dickssportinggoods';
-  }
-
-  if (cleaned.includes('jdsports')) return 'jdsports';
-  if (cleaned.includes('snipes')) return 'snipes';
-  if (cleaned.includes('goat')) return 'goat';
-  if (cleaned.includes('stockx')) return 'stockx';
-  if (cleaned.includes('ebay')) return 'ebay';
-  if (cleaned.includes('poshmark')) return 'poshmark';
-  if (cleaned.includes('mercari')) return 'mercari';
-  if (cleaned.includes('whatnot')) return 'whatnot';
-  if (cleaned.includes('sidelineswap')) return 'sidelineswap';
-
-  return cleaned;
-}
-function cleanRetailerDisplayName(source) {
-  const key = normalizeRetailerSource(source);
-
-  const displayNames = {
-    nike: 'Nike',
-    target: 'Target',
-    walmart: 'Walmart',
-    costco: 'Costco',
-    finishline: 'Finish Line',
-    dickssportinggoods: "Dick's Sporting Goods",
-    jdsports: 'JD Sports',
-    snipes: 'SNIPES USA',
-    goat: 'GOAT',
-    stockx: 'StockX',
-    ebay: 'eBay',
-    poshmark: 'Poshmark',
-    mercari: 'Mercari',
-    whatnot: 'Whatnot',
-    sidelineswap: 'SidelineSwap',
-  };
-
-  return displayNames[key] || String(source || '').replace(/\s+/g, ' ').trim();
-}
-
-function extractSkuFromText(text) {
-  const value = String(text || '').toUpperCase();
-
-  const matches = value.match(/\b[A-Z0-9]{6}-[0-9]{3}\b/g);
-
-  if (!matches || matches.length === 0) {
-    return null;
-  }
-
-  return matches.find((m) => !m.startsWith('HTTP')) || matches[0];
-}
-
-function smartMatchConfidence(query, title, source, price) {
-  const queryText = String(query || '').toLowerCase();
-  const titleText = String(title || '').toLowerCase();
-  const sourceText = String(source || '').toLowerCase();
-
-  const querySku = extractSkuFromText(query);
-  const titleSku = extractSkuFromText(title);
-
-  let score = 0;
-
-  if (querySku && titleSku && querySku === titleSku) {
-    score += 55;
-  }
-
-  if (
-    querySku &&
-    titleText.includes(querySku.toLowerCase())
-  ) {
-    score += 45;
-  }
-
-  const importantWords = queryText
-    .replace(/[^a-z0-9\s-]/g, '')
-    .split(/\s+/)
-    .filter((word) => word.length > 2)
-    .filter(
-      (word) =>
-        ![
-          'mens',
-          'womens',
-          'men',
-          'women',
-          'shoes',
-          'shoe',
-          'nike',
-          'target',
-          'walmart',
-          'costco',
-        ].includes(word)
-    );
-
-  let matchedWords = 0;
-
-  for (const word of importantWords) {
-    if (titleText.includes(word)) {
-      matchedWords++;
-    }
-  }
-
-  if (importantWords.length > 0) {
-    score += Math.round(
-      (matchedWords / importantWords.length) * 45
+    return Scaffold(
+      backgroundColor: green,
+      body: SafeArea(
+        child: Padding(
+          padding: EdgeInsets.all(isPhone ? 22 : 28),
+          child: Center(
+            child: SingleChildScrollView(
+              child: Column(
+                children: [
+                  Image.asset(
+                    'assets/sale_scout_logo.png',
+                    height: isPhone ? 130 : 190,
+                  ),
+                  const SizedBox(height: 24),
+                  Text(
+                    isLogin ? 'Welcome back, Scout' : 'Create your account',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: cream,
+                      fontSize: isPhone ? 26 : 30,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Track deals, save your watchlist, and monitor prices.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: cream.withOpacity(.7),
+                      fontSize: 16,
+                    ),
+                  ),
+                  const SizedBox(height: 30),
+                  TextField(
+                    controller: emailController,
+                    style: TextStyle(color: cream),
+                    decoration: InputDecoration(
+                      hintText: 'Email',
+                      hintStyle: TextStyle(color: cream.withOpacity(.5)),
+                      filled: true,
+                      fillColor: fieldGreen,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: passwordController,
+                    obscureText: true,
+                    style: TextStyle(color: cream),
+                    decoration: InputDecoration(
+                      hintText: 'Password',
+                      hintStyle: TextStyle(color: cream.withOpacity(.5)),
+                      filled: true,
+                      fillColor: fieldGreen,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
+                  ),
+                  if (errorMessage.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      errorMessage,
+                      style: const TextStyle(color: Colors.redAccent),
+                    ),
+                  ],
+                  const SizedBox(height: 22),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 56,
+                    child: ElevatedButton(
+                      onPressed: isLoading ? null : submit,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: lightGreen,
+                        foregroundColor: green,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(18),
+                        ),
+                      ),
+                      child: Text(
+                        isLoading
+                            ? 'Please wait...'
+                            : isLogin
+                                ? 'Log In'
+                                : 'Sign Up',
+                        style: const TextStyle(
+                          fontSize: 19,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  TextButton(
+                    onPressed: () {
+                      setState(() {
+                        isLogin = !isLogin;
+                        errorMessage = '';
+                      });
+                    },
+                    child: Text(
+                      isLogin
+                          ? 'Need an account? Sign up'
+                          : 'Already have an account? Log in',
+                      style: TextStyle(color: cream),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
-
-  if (
-    queryText.includes('nike') &&
-    titleText.includes('nike')
-  ) {
-    score += 10;
-  }
-
-  if (
-    queryText.includes('target') &&
-    sourceText.includes('target')
-  ) {
-    score += 10;
-  }
-
-  if (
-    queryText.includes('walmart') &&
-    sourceText.includes('walmart')
-  ) {
-    score += 10;
-  }
-
-  if (
-    queryText.includes('costco') &&
-    sourceText.includes('costco')
-  ) {
-    score += 10;
-  }
-
-  if (
-    queryText.includes('air max') &&
-    titleText.includes('air max')
-  ) {
-    score += 10;
-  }
-
-  if (
-    queryText.includes('dunk') &&
-    titleText.includes('dunk')
-  ) {
-    score += 10;
-  }
-
-  if (
-    queryText.includes('force') &&
-    titleText.includes('force')
-  ) {
-    score += 10;
-  }
-
-  if (sourceText.includes('target')) score += 8;
-  if (sourceText.includes('walmart')) score += 8;
-  if (sourceText.includes('costco')) score += 8;
-  if (sourceText.includes('nike')) score += 8;
-
-  if (
-    titleText.includes('kids') ||
-    titleText.includes('baby') ||
-    titleText.includes('toddler')
-  ) {
-    score -= 15;
-  }
-
-  if (
-    titleText.includes('used') ||
-    titleText.includes('pre-owned')
-  ) {
-    score -= 18;
-  }
-
-  if (
-    titleText.includes('refurbished') ||
-    titleText.includes('renewed') ||
-    titleText.includes('open box')
-  ) {
-    score -= 20;
-  }
-
-  if (price < 2) {
-    score -= 20;
-  }
-
-  return Math.max(0, Math.min(100, score));
 }
 
-function cleanPrice(value) {
-  if (!value) return null;
+class DealResult {
+  final String title;
+  final double price;
+  final String source;
+  final String link;
+  final String thumbnail;
+  final int confidence;
+  final Map<String, dynamic> verificationSignals;
 
-  const match = String(value)
-    .replace(/,/g, '')
-    .match(/\$?\s?([0-9]+(?:\.[0-9]{1,2})?)/);
+  DealResult({
+    required this.title,
+    required this.price,
+    required this.source,
+    required this.link,
+    required this.thumbnail,
+    required this.confidence,
+    required this.verificationSignals,
+  });
 
-  if (!match) return null;
-
-  const price = Math.round(Number(match[1]));
-
-  if (!price || price < 1 || price > 5000) {
-    return null;
-  }
-
-  return price;
-}
-
-function cleanText(value) {
-  return String(value || '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function cleanNikeTitle(title) {
-  return cleanText(title)
-    .replace('| Nike', '')
-    .replace('| Nike.com', '')
-    .replace('. Nike.com', '')
-    .trim();
-}
-
-async function scrapeNike(url) {
-  let browser;
-
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-      ],
-    });
-
-    const page = await browser.newPage({
-      viewport: {
-        width: 1200,
-        height: 900,
-      },
-
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-    });
-
-    await page.route('**/*', (route) => {
-      const type = route.request().resourceType();
-
-      if (
-        ['image', 'font', 'media'].includes(type)
-      ) {
-        route.abort();
-      } else {
-        route.continue();
-      }
-    });
-
-    await page.goto(url, {
-      waitUntil: 'domcontentloaded',
-      timeout: 90000,
-    });
-
-    await page.waitForTimeout(5000);
-
-    const result = await page.evaluate(() => {
-      const getMeta = (name) => {
-        const el =
-          document.querySelector(
-            `meta[property="${name}"]`
-          ) ||
-          document.querySelector(
-            `meta[name="${name}"]`
-          );
-
-        return el
-          ? el.getAttribute('content')
-          : '';
+  Map<String, dynamic> toJson() => {
+        'title': title,
+        'price': price,
+        'source': source,
+        'link': link,
+        'thumbnail': thumbnail,
+        'confidence': confidence,
+        'verificationSignals': verificationSignals,
       };
 
-      const title =
-        getMeta('og:title') ||
-        document.querySelector('h1')
-          ?.innerText ||
-        document.title ||
-        'Nike Product';
+  factory DealResult.fromJson(Map<String, dynamic> json) {
+    final rawPrice = json['price'];
+    final rawSignals = json['verificationSignals'];
 
-      const imageUrl =
-        getMeta('og:image') ||
-        getMeta('twitter:image') ||
-        '';
+    return DealResult(
+      title: decodeHtmlEntities(json['title']?.toString() ?? ''),
+      price: rawPrice is num
+          ? rawPrice.toDouble()
+          : double.tryParse((rawPrice ?? '0').toString()) ?? 0,
+      source: json['source']?.toString() ?? '',
+      link: json['link']?.toString() ?? '',
+      thumbnail: json['thumbnail']?.toString() ?? '',
+      confidence: json['confidence'] is num
+          ? (json['confidence'] as num).round()
+          : int.tryParse((json['confidence'] ?? '0').toString()) ?? 0,
+      verificationSignals: rawSignals is Map
+          ? Map<String, dynamic>.from(rawSignals)
+          : <String, dynamic>{
+              'positive': <dynamic>[],
+              'warnings': <dynamic>[],
+            },
+    );
+  }
+}
 
-      const currentPriceEl =
-        document.querySelector(
-          '[data-testid="currentPrice-container"]'
-        ) ||
-        document.querySelector(
-          '[data-test="currentPrice-container"]'
-        );
+class ProductItem {
+  final String url;
+  final String title;
+  final String sku;
+  final String retailer;
+  final double currentPrice;
+  final double originalPrice;
+  final bool originalPriceAvailable;
+  final String imageUrl;
+  final double betterDealPrice;
+  final String betterDealStore;
+  final int confidence;
+  final String lastChecked;
+  final bool priceDropped;
+  final String source;
+  final List<Map<String, dynamic>> priceHistory;
+  final List<DealResult> dealResults;
 
-      const originalPriceEl =
-        document.querySelector(
-          '[data-testid="initialPrice-container"]'
-        ) ||
-        document.querySelector(
-          '[data-test="initialPrice-container"]'
-        );
+  ProductItem({
+    required this.url,
+    required this.title,
+    required this.sku,
+    required this.retailer,
+    required this.currentPrice,
+    required this.originalPrice,
+    required this.originalPriceAvailable,
+    required this.imageUrl,
+    required this.betterDealPrice,
+    required this.betterDealStore,
+    required this.confidence,
+    required this.lastChecked,
+    required this.priceDropped,
+    required this.source,
+    required this.priceHistory,
+    required this.dealResults,
+  });
 
-      const currentPriceText =
-        currentPriceEl
-          ? currentPriceEl.innerText ||
-            currentPriceEl.textContent ||
-            ''
-          : '';
+  Map<String, dynamic> toJson() => {
+        'url': url,
+        'title': title,
+        'sku': sku,
+        'retailer': retailer,
+        'currentPrice': currentPrice,
+        'originalPrice': originalPrice,
+        'originalPriceAvailable': originalPriceAvailable,
+        'imageUrl': imageUrl,
+        'betterDealPrice': betterDealPrice,
+        'betterDealStore': betterDealStore,
+        'confidence': confidence,
+        'lastChecked': lastChecked,
+        'priceDropped': priceDropped,
+        'source': source,
+        'priceHistory': priceHistory
+            .map(
+              (entry) => {
+                'price': entry['price'],
+                'timestamp': entry['timestamp'],
+              },
+            )
+            .toList(),
+        'dealResults': dealResults.map((deal) => deal.toJson()).toList(),
+      };
 
-      const originalPriceText =
-        originalPriceEl
-          ? originalPriceEl.innerText ||
-            originalPriceEl.textContent ||
-            ''
-          : '';
-
-      const visiblePriceCandidates =
-        Array.from(
-          document.querySelectorAll('body *')
-        )
-          .map((el) => {
-            const rect =
-              el.getBoundingClientRect();
+  factory ProductItem.fromJson(Map<String, dynamic> json) {
+    return ProductItem(
+      url: json['url'] ?? '',
+      title: decodeHtmlEntities(json['title'] ?? 'Unknown Product'),
+      sku: json['sku'] ?? '',
+      retailer: json['retailer'] ?? 'Unknown',
+      currentPrice: (json['currentPrice'] ?? 0).toDouble(),
+      originalPrice: (json['originalPrice'] ?? 0).toDouble(),
+      originalPriceAvailable: json['originalPriceAvailable'] ?? false,
+      imageUrl: json['imageUrl'] ?? '',
+      betterDealPrice: (json['betterDealPrice'] ?? 0).toDouble(),
+      betterDealStore: json['betterDealStore'] ?? 'Unknown',
+      confidence: (json['confidence'] ?? 0).round(),
+      lastChecked: json['lastChecked'] ?? 'Not checked yet',
+      priceDropped: json['priceDropped'] ?? false,
+      source: json['source'] ?? 'unknown',
+      priceHistory: List<Map<String, dynamic>>.from(
+        (json['priceHistory'] ?? []).map(
+          (entry) {
+            if (entry is num) {
+              return {
+                'price': entry.toDouble(),
+                'timestamp': DateTime.now().toIso8601String(),
+              };
+            }
 
             return {
-              text:
-                (
-                  el.innerText ||
-                  el.textContent ||
-                  ''
-                ).trim(),
-
-              visible:
-                rect.width > 0 &&
-                rect.height > 0 &&
-                rect.top >= 0 &&
-                rect.top < 900,
+              'price': ((entry['price'] ?? 0) as num).toDouble(),
+              'timestamp':
+                  entry['timestamp'] ?? DateTime.now().toIso8601String(),
             };
-          })
-          .filter((item) => item.visible)
-          .filter((item) =>
-            item.text.includes('$')
-          )
-          .filter(
-            (item) => item.text.length <= 100
-          );
-
-      const pageText = `${
-        document.body.innerText || ''
-      } ${
-        document.documentElement.innerHTML || ''
-      }`.toUpperCase();
-
-      const skuMatch =
-        pageText.match(
-          /\b[A-Z0-9]{6}-[0-9]{3}\b/
-        ) ||
-        pageText.match(
-          /\b[A-Z]{2}[0-9]{4}-[0-9]{3}\b/
-        );
-
-      return {
-        title,
-        imageUrl,
-        currentPriceText,
-        originalPriceText,
-        visiblePriceCandidates,
-        sku: skuMatch ? skuMatch[0] : null,
-      };
-    });
-
-    const currentPrice = cleanPrice(
-      result.currentPriceText
-    );
-
-    const originalPrice = cleanPrice(
-      result.originalPriceText
-    );
-
-    let finalCurrentPrice = currentPrice;
-    let finalOriginalPrice = originalPrice;
-
-    if (!finalCurrentPrice) {
-      const fallbackPrices =
-        result.visiblePriceCandidates
-          .map((item) =>
-            cleanPrice(item.text)
-          )
-          .filter(
-            (price) => price !== null
-          );
-
-      const uniquePrices = [
-        ...new Set(fallbackPrices),
-      ].sort((a, b) => a - b);
-
-      finalCurrentPrice =
-        uniquePrices[0] || 0;
-
-      finalOriginalPrice =
-        uniquePrices.length > 1
-          ? uniquePrices[
-              uniquePrices.length - 1
-            ]
-          : null;
-    }
-
-    const finalSku =
-      result.sku ||
-      extractSkuFromText(url);
-
-    return {
-      title: cleanNikeTitle(result.title),
-      sku: finalSku,
-      retailer: 'Nike',
-      currentPrice:
-        finalCurrentPrice || 0,
-
-      originalPrice:
-        finalOriginalPrice &&
-        finalOriginalPrice >
-          finalCurrentPrice
-          ? finalOriginalPrice
-          : null,
-
-      originalPriceAvailable:
-        Boolean(
-          finalOriginalPrice &&
-            finalOriginalPrice >
-              finalCurrentPrice
+          },
         ),
-
-      imageUrl: result.imageUrl || '',
-
-      source: 'nike_sku_detection_v1',
-    };
-  } finally {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (closeError) {
-        console.error(
-          'Browser close failed:',
-          closeError.message
-        );
-      }
-    }
-  }
-}
-async function scrapeTarget(url) {
-  try {
-    const tcinMatch = url.match(/A-(\d+)/i);
-
-    if (!tcinMatch) {
-      throw new Error('Could not extract Target TCIN');
-    }
-
-    const tcin = tcinMatch[1];
-
-    const redskyUrl =
-      `https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1` +
-      `?key=9f36aeafbe60771e321a7cc95a78140772ab3e96` +
-      `&tcin=${encodeURIComponent(tcin)}` +
-      `&store_id=1771` +
-      `&pricing_store_id=1771` +
-      `&has_pricing_store_id=true` +
-      `&has_financing_options=true`;
-
-    const response = await fetch(redskyUrl, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-        Accept: 'application/json',
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`Target API failed: ${response.status}`);
-    }
-
-    const data = await response.json();
-    const product = data?.data?.product;
-
-    if (!product) {
-      throw new Error('No product found in Target API response');
-    }
-
-    const priceData = product.price || {};
-
-    const currentPrice =
-      parseFloat(priceData.current_retail) ||
-      parseFloat(String(priceData.formatted_current_price || '').replace('$', ''));
-
-    const originalPrice =
-      parseFloat(priceData.reg_retail) ||
-      parseFloat(String(priceData.formatted_comparison_price || '').replace('$', ''));
-
-    const imageUrl =
-      product?.item?.enrichment?.images?.primary_image_url ||
-      product?.item?.enrichment?.images?.alternate_image_urls?.[0] ||
-      '';
-
-    return {
-      title: product?.item?.product_description?.title || 'Target Product',
-      sku: tcin,
-      retailer: 'Target',
-      currentPrice: currentPrice || 0,
-      originalPrice:
-        originalPrice && originalPrice > currentPrice ? originalPrice : null,
-      originalPriceAvailable: Boolean(
-        originalPrice && originalPrice > currentPrice
       ),
-      imageUrl,
-      source: 'target_redsky_api_v1',
-    };
-  } catch (error) {
-    console.error('TARGET SCRAPER ERROR:', error.message);
-
-    return {
-      title: 'Target Product',
-      sku: null,
-      retailer: 'Target',
-      currentPrice: 0,
-      originalPrice: null,
-      originalPriceAvailable: false,
-      imageUrl: '',
-      source: 'target_redsky_api_failed',
-      error: error.message,
-    };
+      dealResults: List<DealResult>.from(
+        (json['dealResults'] ?? []).map(
+          (deal) => DealResult.fromJson(Map<String, dynamic>.from(deal)),
+        ),
+      ),
+    );
   }
 }
-app.get('/debug', (req, res) => {
-  res.json({
-    status: 'ok',
-    version: 'stable_nike_links_verification',
-    nikeProductEndpoint: true,
-    searchDealsEndpoint: true,
-    targetEnabled: false,
-  });
-});
 
-app.get('/debug-target-url', async (req, res) => {
-  const url = req.query.url;
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
 
-  if (!url) {
-    return res.status(400).json({
-      error: 'Missing Target URL',
-    });
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  final TextEditingController urlController = TextEditingController();
+
+  final Color cream = const Color(0xFFF0E4C5);
+  final Color green = const Color(0xFF0B1A13);
+  final Color lightGreen = const Color(0xFFA7C97A);
+  final Color cardGreen = const Color(0xFF13281E);
+  final Color fieldGreen = const Color(0xFF102219);
+  final Color gold = const Color(0xFFE0A24A);
+
+  List<ProductItem> trackedItems = [];
+  bool isLoading = false;
+  bool isRefreshing = false;
+  bool apiScanInProgress = false;
+  bool showDropAlert = false;
+
+  String plan = 'Scout';
+  int itemLimit = 5;
+
+  Timer? monitorTimer;
+  int countdown = 3600;
+
+  String get uid => FirebaseAuth.instance.currentUser!.uid;
+
+  DocumentReference<Map<String, dynamic>> get userDoc =>
+      FirebaseFirestore.instance.collection('users').doc(uid);
+
+  @override
+  void initState() {
+    super.initState();
+    loadUserData();
+
+    startMonitoring();
   }
 
-  try {
-    const result = await scrapeTarget(url);
-
-    return res.json({
-      status: 'ok',
-      route: 'debug-target-url',
-      targetEnabledInApp: false,
-      result,
-    });
-  } catch (error) {
-    console.error('DEBUG TARGET ERROR:', error.message);
-
-    return res.status(500).json({
-      status: 'error',
-      route: 'debug-target-url',
-      error: error.message,
-    });
-  }
-});
-app.get('/debug-target-html', async (req, res) => {
-  const url = req.query.url;
-
-  if (!url) {
-    return res.status(400).json({
-      error: 'Missing Target URL',
-    });
+  @override
+  void dispose() {
+    monitorTimer?.cancel();
+    urlController.dispose();
+    super.dispose();
   }
 
-  let browser;
+  void showMessage(String message) {
+    if (!mounted) return;
 
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-      ],
-    });
+    ScaffoldMessenger.of(context).clearSnackBars();
 
-    const page = await browser.newPage({
-      viewport: { width: 1200, height: 900 },
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-    });
-
-    await page.goto(url, {
-      waitUntil: 'domcontentloaded',
-      timeout: 90000,
-    });
-
-    await page.waitForTimeout(7000);
-
-    const result = await page.evaluate(() => {
-      const html = document.documentElement.innerHTML || '';
-      const text = document.body.innerText || '';
-
-      return {
-        title: document.title,
-        textIncludesDollar: text.includes('$'),
-        htmlIncludesCurrentRetail: html.includes('current_retail'),
-        htmlIncludesFormattedCurrentPrice: html.includes('formatted_current_price'),
-        htmlIncludesPrice: html.includes('price'),
-        htmlIncludesTCIN: html.includes('TCIN') || html.includes('tcin'),
-        textSample: text.slice(0, 3000),
-        htmlSample: html.slice(0, 5000),
-      };
-    });
-
-    return res.json({
-      status: 'ok',
-      route: 'debug-target-html',
-      result,
-    });
-  } catch (error) {
-    return res.status(500).json({
-      status: 'error',
-      route: 'debug-target-html',
-      error: error.message,
-    });
-  } finally {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (_) {}
-    }
-  }
-});
-app.get('/debug-target-scripts', async (req, res) => {
-  const url = req.query.url;
-
-  if (!url) {
-    return res.status(400).json({
-      error: 'Missing Target URL',
-    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        duration: const Duration(seconds: 4),
+      ),
+    );
   }
 
-  let browser;
+  void startMonitoring() {
+    monitorTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
 
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-      ],
-    });
+      setState(() {
+        countdown--;
+      });
 
-    const page = await browser.newPage({
-      viewport: { width: 1200, height: 900 },
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-    });
+      if (countdown <= 0) {
+        countdown = 3600;
 
-    await page.goto(url, {
-      waitUntil: 'domcontentloaded',
-      timeout: 90000,
-    });
-
-    await page.waitForTimeout(7000);
-
-    const result = await page.evaluate(() => {
-      const scripts = Array.from(document.querySelectorAll('script'))
-        .map((script, index) => {
-          const text = script.textContent || '';
-
-          return {
-            index,
-            length: text.length,
-            includesPrice: text.toLowerCase().includes('price'),
-            includesTCIN:
-              text.toLowerCase().includes('tcin') ||
-              text.includes('94784166'),
-            includesCurrentRetail: text.includes('current_retail'),
-            includesFormattedPrice: text.includes('formatted_current_price'),
-            sample: text.slice(0, 1000),
-          };
-        })
-        .filter(
-          (script) =>
-            script.includesPrice ||
-            script.includesTCIN ||
-            script.includesCurrentRetail ||
-            script.includesFormattedPrice
-        );
-
-      return {
-        scriptCount: document.querySelectorAll('script').length,
-        matchingScripts: scripts.slice(0, 10),
-      };
-    });
-
-    return res.json({
-      status: 'ok',
-      route: 'debug-target-scripts',
-      result,
-    });
-  } catch (error) {
-    return res.status(500).json({
-      status: 'error',
-      route: 'debug-target-scripts',
-      error: error.message,
-    });
-  } finally {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (_) {}
-    }
-  }
-});
-app.get('/debug-target-network', async (req, res) => {
-  const url = req.query.url;
-
-  if (!url) {
-    return res.status(400).json({
-      error: 'Missing Target URL',
-    });
-  }
-
-  let browser;
-
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-      ],
-    });
-
-    const page = await browser.newPage({
-      viewport: { width: 1200, height: 900 },
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-    });
-
-    const interestingRequests = [];
-
-    page.on('request', (request) => {
-      const requestUrl = request.url();
-      const lower = requestUrl.toLowerCase();
-
-      if (
-        lower.includes('redsky') ||
-        lower.includes('price') ||
-        lower.includes('tcin') ||
-        lower.includes('product')
-      ) {
-        interestingRequests.push({
-          method: request.method(),
-          url: requestUrl,
-        });
+        refreshPrices(autoScan: true);
       }
     });
+  }
 
-    await page.goto(url, {
-      waitUntil: 'domcontentloaded',
-      timeout: 90000,
-    });
+  Future<void> loadUserData() async {
+    final snapshot = await userDoc.get();
 
-    await page.waitForTimeout(7000);
+    if (!snapshot.exists) {
+      await userDoc.set({
+        'email': FirebaseAuth.instance.currentUser?.email,
+        'plan': 'Scout',
+        'itemLimit': 5,
+        'createdAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+        'trackedItems': [],
+      }, SetOptions(merge: true));
 
-    return res.json({
-      status: 'ok',
-      route: 'debug-target-network',
-      requestCount: interestingRequests.length,
-      requests: interestingRequests.slice(0, 30),
+      if (!mounted) return;
+
+      setState(() {
+        trackedItems = [];
+        plan = 'Scout';
+        itemLimit = 5;
+      });
+
+      return;
+    }
+
+    final data = snapshot.data() ?? {};
+
+    final items = List<Map<String, dynamic>>.from(
+      (data['trackedItems'] ?? []).map(
+        (item) => Map<String, dynamic>.from(item),
+      ),
+    );
+
+    if (!mounted) return;
+
+    setState(() {
+      plan = data['plan'] ?? 'Scout';
+      itemLimit = data['itemLimit'] ?? 5;
+      trackedItems = items.map((item) => ProductItem.fromJson(item)).toList();
     });
-  } catch (error) {
-    return res.status(500).json({
-      status: 'error',
-      route: 'debug-target-network',
-      error: error.message,
-    });
-  } finally {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (_) {}
+  }
+
+  Future<void> saveUserData() async {
+    await userDoc.set({
+      'email': FirebaseAuth.instance.currentUser?.email,
+      'plan': plan,
+      'itemLimit': itemLimit,
+      'updatedAt': FieldValue.serverTimestamp(),
+      'trackedItems': trackedItems.map((item) => item.toJson()).toList(),
+    }, SetOptions(merge: true));
+  }
+
+  Future<List<DealResult>> searchDealsForProduct(
+    String title,
+    String sku,
+  ) async {
+    try {
+      final searchQuery = sku.isNotEmpty ? '$title $sku' : title;
+
+      final encodedQuery = Uri.encodeComponent(searchQuery);
+
+      final response = await http
+          .get(
+            Uri.parse(
+              'https://sale-scout-api.onrender.com/search-deals?q=$encodedQuery',
+            ),
+          )
+          .timeout(const Duration(seconds: 45));
+
+      if (response.statusCode != 200) {
+        print('Search deals bad status: ${response.statusCode}');
+        print(response.body);
+        return [];
+      }
+
+      final decoded = jsonDecode(response.body);
+
+      if (decoded is! Map<String, dynamic>) {
+        return [];
+      }
+
+      final rawResults = decoded['results'];
+
+      if (rawResults is! List) {
+        return [];
+      }
+
+      final deals = rawResults
+          .map((item) => DealResult.fromJson(Map<String, dynamic>.from(item)))
+          .where((deal) =>
+              deal.title.isNotEmpty && deal.source.isNotEmpty && deal.price > 0)
+          .toList();
+
+      deals.sort((a, b) => a.price.compareTo(b.price));
+
+      return deals.take(8).toList();
+    } catch (e) {
+      print('SEARCH DEALS ERROR: $e');
+      return [];
     }
   }
-});
-app.get('/debug-target-responses', async (req, res) => {
-  const url = req.query.url;
 
-  if (!url) {
-    return res.status(400).json({
-      error: 'Missing Target URL',
-    });
+  Future<ProductItem?> getProductFromApi(
+    String url, {
+    ProductItem? oldItem,
+  }) async {
+    try {
+      final encodedUrl = Uri.encodeComponent(url);
+
+      final response = await http
+          .get(
+            Uri.parse(
+              'https://sale-scout-api.onrender.com/product?url=$encodedUrl',
+            ),
+          )
+          .timeout(const Duration(seconds: 120));
+
+      if (response.statusCode != 200) {
+        print('Sale Scout API bad status: ${response.statusCode}');
+        print(response.body);
+
+        if (response.statusCode == 429) {
+          showMessage('Scanner is busy. Please wait a moment and try again.');
+        } else {
+          showMessage('Product scan failed. Please try again.');
+        }
+
+        return null;
+      }
+
+      final decoded = jsonDecode(response.body);
+
+      if (decoded is! Map<String, dynamic>) {
+        print('Sale Scout API returned invalid JSON.');
+        showMessage('Product scan returned invalid data.');
+        return null;
+      }
+
+      final data = decoded;
+
+      if (data['error'] != null) {
+        print('Sale Scout API error: ${data['error']}');
+        showMessage(data['error'].toString());
+        return null;
+      }
+
+      final title = decodeHtmlEntities((data['title'] ?? '').toString().trim());
+      final retailer = (data['retailer'] ?? '').toString().trim();
+      final currentPriceValue = data['currentPrice'];
+
+      final newPrice = currentPriceValue is num
+          ? currentPriceValue.toDouble()
+          : double.tryParse((currentPriceValue ?? '').toString()) ?? 0;
+
+      if (title.isEmpty ||
+          title == 'Unknown Product' ||
+          retailer.isEmpty ||
+          retailer == 'Unknown' ||
+          newPrice <= 0) {
+        print('Rejected bad product response: $data');
+        showMessage('Sale Scout could not read this product yet. Try again.');
+        return null;
+      }
+
+      final oldPrice = oldItem?.currentPrice;
+
+      final history = oldItem == null
+          ? createInitialHistory(newPrice)
+          : [
+              ...oldItem.priceHistory,
+              {
+                'price': newPrice,
+                'timestamp': DateTime.now().toIso8601String(),
+              }
+            ];
+
+      final originalAvailable = data['originalPriceAvailable'] ?? false;
+      final rawOriginal = data['originalPrice'];
+      final betterDeal = data['betterDeal'];
+      final sku = (data['sku'] ?? '').toString().trim();
+
+      final deals = await searchDealsForProduct(title, sku);
+      final cheapestDeal =
+          deals.isEmpty ? null : deals.reduce((a, b) => a.price < b.price ? a : b);
+
+      return ProductItem(
+        url: url,
+        title: title,
+        sku: sku,
+        retailer: retailer,
+        currentPrice: newPrice,
+        originalPrice: rawOriginal is num ? rawOriginal.toDouble() : 0,
+        originalPriceAvailable: originalAvailable == true,
+        imageUrl: data['imageUrl'] ?? '',
+        betterDealPrice: cheapestDeal?.price ??
+            (betterDeal is Map && betterDeal['price'] is num
+                ? (betterDeal['price'] as num).toDouble()
+                : newPrice),
+        betterDealStore: cheapestDeal?.source ??
+            (betterDeal is Map
+                ? (betterDeal['store'] ?? 'Unknown').toString()
+                : 'Unknown'),
+        confidence: betterDeal is Map && betterDeal['confidence'] is num
+            ? (betterDeal['confidence'] as num).round()
+            : 0,
+        lastChecked: DateTime.now().toLocal().toString().substring(0, 16),
+        priceDropped: oldPrice != null && newPrice > 0 && newPrice < oldPrice,
+        source: data['source'] ?? 'unknown',
+        priceHistory: history,
+        dealResults: deals,
+      );
+    } catch (e) {
+      print(e);
+      showMessage('Product scan timed out or failed. Please try again.');
+      return null;
+    }
   }
 
-  let browser;
+  List<Map<String, dynamic>> createInitialHistory(double currentPrice) {
+    return [
+      {
+        'price': currentPrice,
+        'timestamp': DateTime.now().toIso8601String(),
+      }
+    ];
+  }
 
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-      ],
+  Future<void> fetchProduct() async {
+    if (apiScanInProgress) {
+      showMessage('A scan is already running. Please wait.');
+      return;
+    }
+
+    final url = urlController.text.trim();
+
+    if (url.isEmpty) return;
+
+    if (trackedItems.length >= itemLimit) {
+      showLimitDialog();
+      return;
+    }
+
+    if (!mounted) return;
+
+    setState(() {
+      isLoading = true;
+      apiScanInProgress = true;
     });
 
-    const page = await browser.newPage({
-      viewport: { width: 1200, height: 900 },
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+    try {
+      final item = await getProductFromApi(url);
+
+      if (item != null) {
+        if (!mounted) return;
+
+        setState(() {
+          trackedItems.insert(0, item);
+          urlController.clear();
+        });
+
+        await saveUserData();
+      }
+    } finally {
+      if (!mounted) return;
+
+      setState(() {
+        isLoading = false;
+        apiScanInProgress = false;
+      });
+    }
+  }
+
+  Future<void> refreshPrices({bool autoScan = false}) async {
+    if (apiScanInProgress) return;
+    if (trackedItems.isEmpty) return;
+
+    if (!mounted) return;
+
+    setState(() {
+      isRefreshing = true;
+      apiScanInProgress = true;
     });
 
-    const interestingResponses = [];
+    final updatedItems = <ProductItem>[];
+    bool anyDrop = false;
 
-    page.on('response', async (response) => {
-      try {
-        const responseUrl = response.url();
-        const lower = responseUrl.toLowerCase();
-        const contentType = response.headers()['content-type'] || '';
+    try {
+      for (final item in trackedItems) {
+        final updated = await getProductFromApi(item.url, oldItem: item);
 
-        if (
-          lower.includes('redsky') ||
-          lower.includes('price') ||
-          lower.includes('tcin') ||
-          lower.includes('product') ||
-          contentType.includes('application/json')
-        ) {
-          const text = await response.text();
+        if (updated != null && updated.priceDropped) {
+          anyDrop = true;
+        }
 
-          if (
-            text.toLowerCase().includes('price') ||
-            text.toLowerCase().includes('tcin') ||
-            text.includes('94784166')
-          ) {
-            interestingResponses.push({
-              url: responseUrl,
-              status: response.status(),
-              contentType,
-              includesPrice: text.toLowerCase().includes('price'),
-              includesTCIN:
-                text.toLowerCase().includes('tcin') ||
-                text.includes('94784166'),
-              sample: text.slice(0, 1500),
+        updatedItems.add(updated ?? item);
+
+        await Future.delayed(const Duration(seconds: 3));
+      }
+
+      if (!mounted) return;
+
+      setState(() {
+        trackedItems = updatedItems;
+        showDropAlert = anyDrop;
+      });
+
+      await saveUserData();
+
+      if (anyDrop) {
+        Future.delayed(const Duration(seconds: 5), () {
+          if (mounted) {
+            setState(() {
+              showDropAlert = false;
             });
           }
-        }
-      } catch (_) {}
-    });
+        });
+      }
+    } finally {
+      if (!mounted) return;
 
-    await page.goto(url, {
-      waitUntil: 'domcontentloaded',
-      timeout: 90000,
-    });
-
-    await page.waitForTimeout(10000);
-
-    return res.json({
-      status: 'ok',
-      route: 'debug-target-responses',
-      responseCount: interestingResponses.length,
-      responses: interestingResponses.slice(0, 10),
-    });
-  } catch (error) {
-    return res.status(500).json({
-      status: 'error',
-      route: 'debug-target-responses',
-      error: error.message,
-    });
-  } finally {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (_) {}
+      setState(() {
+        isRefreshing = false;
+        apiScanInProgress = false;
+      });
     }
   }
-});
-app.get('/debug-target-price-responses', async (req, res) => {
-  const url = req.query.url;
 
-  if (!url) {
-    return res.status(400).json({
-      error: 'Missing Target URL',
+  Future<void> removeItem(int index) async {
+    setState(() {
+      trackedItems.removeAt(index);
     });
+
+    await saveUserData();
   }
 
-  let browser;
-
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-      ],
-    });
-
-    const page = await browser.newPage({
-      viewport: { width: 1200, height: 900 },
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-    });
-
-    const matches = [];
-
-    page.on('response', async (response) => {
-      try {
-        const responseUrl = response.url();
-        const contentType = response.headers()['content-type'] || '';
-
-        if (!contentType.includes('application/json')) return;
-
-        const text = await response.text();
-        const lower = text.toLowerCase();
-
-        if (
-          lower.includes('current_retail') ||
-          lower.includes('formatted_current_price') ||
-          lower.includes('"price"') ||
-          lower.includes('94784166') ||
-          lower.includes('sunscreen spray')
-        ) {
-          matches.push({
-            url: responseUrl,
-            status: response.status(),
-            contentType,
-            includesCurrentRetail: lower.includes('current_retail'),
-            includesFormattedCurrentPrice: lower.includes(
-              'formatted_current_price'
+  void showLimitDialog() {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: cardGreen,
+        title: Text(
+          'Scout Limit Reached',
+          style: TextStyle(
+            color: cream,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        content: Text(
+          'Your Scout plan tracks up to $itemLimit items.\n\nUpgrade to Marksman or Hot Shot later for more tracking power.',
+          style: TextStyle(
+            color: cream.withOpacity(.85),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(
+              'Got it',
+              style: TextStyle(color: lightGreen),
             ),
-            includesPrice: lower.includes('"price"'),
-            includesTCIN: text.includes('94784166'),
-            includesTitle: lower.includes('sunscreen spray'),
-            sample: text.slice(0, 3000),
-          });
-        }
-      } catch (_) {}
-    });
+          ),
+        ],
+      ),
+    );
+  }
 
-    await page.goto(url, {
-      waitUntil: 'domcontentloaded',
-      timeout: 90000,
-    });
+  double lowestPrice(ProductItem item) {
+    if (item.priceHistory.isEmpty) return item.currentPrice;
 
-    await page.waitForTimeout(12000);
+    return item.priceHistory.map((entry) => (entry['price'] as num).toDouble()).reduce(min);
+  }
 
-    return res.json({
-      status: 'ok',
-      route: 'debug-target-price-responses',
-      matchCount: matches.length,
-      matches: matches.slice(0, 8),
-    });
-  } catch (error) {
-    return res.status(500).json({
-      status: 'error',
-      route: 'debug-target-price-responses',
-      error: error.message,
-    });
-  } finally {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (_) {}
+  double highestPrice(ProductItem item) {
+    if (item.priceHistory.isEmpty) return item.currentPrice;
+
+    return item.priceHistory.map((entry) => (entry['price'] as num).toDouble()).reduce(max);
+  }
+
+  double averagePrice(ProductItem item) {
+    if (item.priceHistory.isEmpty) {
+      return item.currentPrice.toDouble();
     }
+
+    final prices = item.priceHistory
+        .map((entry) => (entry['price'] as num).toDouble())
+        .toList();
+
+    final total = prices.reduce((a, b) => a + b);
+
+    return total / prices.length;
   }
-});
-app.get('/debug-target-price-keys', async (req, res) => {
-  const url = req.query.url;
 
-  if (!url) {
-    return res.status(400).json({
-      error: 'Missing Target URL',
-    });
+  int averageDifference(ProductItem item) {
+    final avg = averagePrice(item);
+
+    if (avg <= 0) return 0;
+
+    return (((item.currentPrice - avg) / avg) * 100).round();
   }
 
-  let browser;
+  String smartPriceInsight(ProductItem item) {
+    if (item.priceHistory.length < 2) {
+      return 'Building price history';
+    }
 
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
+    final difference = averageDifference(item);
+
+    if (difference <= -10) {
+      return '${difference.abs()}% below average';
+    }
+
+    if (difference >= 10) {
+      return '${difference.abs()}% above average';
+    }
+
+    return 'Near average price';
+  }
+
+  Color smartPriceInsightColor(ProductItem item) {
+    final difference = averageDifference(item);
+
+    if (difference <= -10) return lightGreen;
+    if (difference >= 10) return Colors.redAccent;
+
+    return cream.withOpacity(.72);
+  }
+
+  String trendLabel(ProductItem item) {
+    if (item.priceHistory.length < 2) return 'Tracking';
+
+    final last = (item.priceHistory.last['price'] as num).toDouble();
+    final previous =
+        (item.priceHistory[item.priceHistory.length - 2]['price'] as num).toDouble();
+
+    if (last < previous) return 'Trending Down';
+    if (last > previous) return 'Trending Up';
+
+    return 'Stable';
+  }
+
+  IconData trendIcon(ProductItem item) {
+    final trend = trendLabel(item);
+
+    if (trend == 'Trending Down') return Icons.trending_down;
+    if (trend == 'Trending Up') return Icons.trending_up;
+
+    return Icons.trending_flat;
+  }
+
+  Color trendColor(ProductItem item) {
+    final trend = trendLabel(item);
+
+    if (trend == 'Trending Down') return lightGreen;
+    if (trend == 'Trending Up') return Colors.redAccent;
+
+    return cream.withOpacity(.72);
+  }
+
+  Future<void> logout() async {
+    await FirebaseAuth.instance.signOut();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final email = FirebaseAuth.instance.currentUser?.email ?? '';
+    final remaining = itemLimit - trackedItems.length;
+    final isPhone = MediaQuery.of(context).size.width < 600;
+
+    return Scaffold(
+      backgroundColor: green,
+      body: SafeArea(
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+            isPhone ? 14 : 22,
+            isPhone ? 6 : 10,
+            isPhone ? 14 : 22,
+            isPhone ? 12 : 22,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (showDropAlert)
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: lightGreen,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Text(
+                    '🚨 Price drop detected!',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: green,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Expanded(
+                    child: Text(
+                      email,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: cream.withOpacity(.7),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: logout,
+                    child: Text(
+                      'Logout',
+                      style: TextStyle(color: cream),
+                    ),
+                  ),
+                ],
+              ),
+              Center(
+                child: Image.asset(
+                  'assets/sale_scout_logo.png',
+                  height: isPhone ? 85 : 165,
+                ),
+              ),
+              SizedBox(height: isPhone ? 4 : 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  _pill('🎖 $plan Plan', lightGreen, green),
+                  _pill(
+                    'Watching ${trackedItems.length}/$itemLimit',
+                    cream,
+                    green,
+                  ),
+                ],
+              ),
+              SizedBox(height: isPhone ? 8 : 10),
+              Wrap(
+                spacing: 10,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color: lightGreen.withOpacity(.16),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: lightGreen.withOpacity(.42)),
+                    ),
+                    child: Text(
+                      apiScanInProgress
+                          ? '🟡 Scan Running'
+                          : '🟢 Monitoring Active',
+                      style: TextStyle(
+                        color: lightGreen,
+                        fontWeight: FontWeight.bold,
+                        fontSize: isPhone ? 12 : 14,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    'Auto scan paused',
+                    style: TextStyle(
+                      color: cream.withOpacity(.68),
+                      fontSize: isPhone ? 12 : 14,
+                    ),
+                  ),
+                ],
+              ),
+              SizedBox(height: isPhone ? 10 : 17),
+              Text(
+                'Track prices across the internet',
+                style: TextStyle(
+                  color: cream,
+                  fontSize: isPhone ? 23 : 31,
+                  height: 1.05,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              SizedBox(height: isPhone ? 6 : 9),
+              Text(
+                'Paste a product URL and Sale Scout will monitor it for price drops.',
+                style: TextStyle(
+                  color: cream.withOpacity(.72),
+                  fontSize: isPhone ? 13 : 16,
+                ),
+              ),
+              SizedBox(height: isPhone ? 12 : 21),
+              TextField(
+                controller: urlController,
+                style: TextStyle(color: cream, fontSize: isPhone ? 14 : 17),
+                decoration: InputDecoration(
+                  hintText: remaining > 0
+                      ? 'Paste product URL...'
+                      : 'Scout item limit reached',
+                  hintStyle: TextStyle(color: cream.withOpacity(.52)),
+                  prefixIcon: Icon(Icons.link, color: cream.withOpacity(.64)),
+                  filled: true,
+                  fillColor: fieldGreen,
+                  contentPadding: EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: isPhone ? 12 : 16,
+                  ),
+                  enabled: remaining > 0 && !apiScanInProgress,
+                  enabledBorder: OutlineInputBorder(
+                    borderSide: BorderSide(color: cream.withOpacity(.28)),
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  disabledBorder: OutlineInputBorder(
+                    borderSide: BorderSide(color: gold.withOpacity(.5)),
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderSide: BorderSide(color: lightGreen, width: 1.8),
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                ),
+              ),
+              SizedBox(height: isPhone ? 10 : 15),
+              SizedBox(
+                width: double.infinity,
+                height: isPhone ? 48 : 56,
+                child: ElevatedButton.icon(
+                  onPressed:
+                      (isLoading || apiScanInProgress) ? null : fetchProduct,
+                  icon: isLoading
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.travel_explore),
+                  label: Text(
+                    isLoading || apiScanInProgress
+                        ? 'Scouting... please wait'
+                        : (remaining > 0 ? 'Track Item' : 'Upgrade Tracking'),
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: isPhone ? 14 : 19,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: lightGreen,
+                    foregroundColor: green,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(18),
+                    ),
+                  ),
+                ),
+              ),
+              SizedBox(height: isPhone ? 8 : 11),
+              SizedBox(
+                width: double.infinity,
+                height: isPhone ? 44 : 50,
+                child: OutlinedButton.icon(
+                  onPressed: (isRefreshing || apiScanInProgress)
+                      ? null
+                      : () => refreshPrices(),
+                  icon: const Icon(Icons.refresh),
+                  label: Text(
+                    isRefreshing || apiScanInProgress
+                        ? 'Scanning Prices...'
+                        : 'Scan Now',
+                    style: TextStyle(fontSize: isPhone ? 14 : 16),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: cream,
+                    side: BorderSide(color: cream.withOpacity(.28)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                ),
+              ),
+              SizedBox(height: isPhone ? 12 : 23),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    'Tracked Items',
+                    style: TextStyle(
+                      color: cream,
+                      fontSize: isPhone ? 23 : 28,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  Text(
+                    '$remaining left',
+                    style: TextStyle(
+                      color: remaining > 0 ? lightGreen : gold,
+                      fontWeight: FontWeight.bold,
+                      fontSize: isPhone ? 12 : 14,
+                    ),
+                  ),
+                ],
+              ),
+              SizedBox(height: isPhone ? 8 : 13),
+              Expanded(
+                child: trackedItems.isEmpty
+                    ? Center(
+                        child: Container(
+                          padding: EdgeInsets.all(isPhone ? 16 : 22),
+                          decoration: BoxDecoration(
+                            color: cardGreen,
+                            borderRadius: BorderRadius.circular(22),
+                            border: Border.all(color: cream.withOpacity(.14)),
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.travel_explore,
+                                color: lightGreen,
+                                size: isPhone ? 34 : 42,
+                              ),
+                              const SizedBox(height: 12),
+                              Text(
+                                'Scout your first deal',
+                                style: TextStyle(
+                                  color: cream,
+                                  fontSize: isPhone ? 19 : 22,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                'Paste a product URL above. Your Scout plan includes $itemLimit tracked items.',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  color: cream.withOpacity(.68),
+                                  fontSize: isPhone ? 13 : 15,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      )
+                    : ListView.builder(
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        itemCount: trackedItems.length,
+                        itemBuilder: (context, index) {
+                          final item = trackedItems[index];
+
+                          return Container(
+                            margin: const EdgeInsets.only(bottom: 17),
+                            padding: EdgeInsets.all(isPhone ? 13 : 17),
+                            decoration: BoxDecoration(
+                              color: cardGreen,
+                              borderRadius: BorderRadius.circular(22),
+                              border: Border.all(color: cream.withOpacity(.14)),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(.22),
+                                  blurRadius: 10,
+                                  offset: const Offset(0, 5),
+                                ),
+                              ],
+                            ),
+                            child: isPhone
+                                ? _mobileProductCard(item, index)
+                                : _desktopProductCard(item, index),
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _desktopProductCard(ProductItem item, int index) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _productImage(item, 98),
+        const SizedBox(width: 16),
+        Expanded(child: _productDetails(item)),
+        IconButton(
+          onPressed: () => removeItem(index),
+          icon: Icon(Icons.delete_outline, color: cream.withOpacity(.72)),
+        ),
       ],
-    });
+    );
+  }
 
-    const page = await browser.newPage({
-      viewport: { width: 1200, height: 900 },
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-    });
+  Widget _mobileProductCard(ProductItem item, int index) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            _productImage(item, 74),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                item.title,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: cream,
+                  fontSize: 17,
+                  height: 1.1,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            IconButton(
+              onPressed: () => removeItem(index),
+              icon: Icon(Icons.delete_outline, color: cream.withOpacity(.72)),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        _productDetails(item, compact: true),
+      ],
+    );
+  }
 
-    const findings = [];
+  Widget _productImage(ProductItem item, double size) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(15),
+      child: Image.network(
+        item.imageUrl,
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => Container(
+          width: size,
+          height: size,
+          color: fieldGreen,
+          child: Icon(Icons.shopping_bag, color: cream.withOpacity(.7)),
+        ),
+      ),
+    );
+  }
 
-    const keywords = [
-      'current_retail',
-      'formatted_current_price',
-      'formattedcurrentprice',
-      'reg_retail',
-      'currentRetail',
-      'price',
-      'offerprice',
-      'purchase_price',
-      'retail_price',
-      'sale_price',
-    ];
+  Widget _productDetails(ProductItem item, {bool compact = false}) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (!compact)
+          Text(
+            item.title,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: cream,
+              fontSize: 21,
+              height: 1.08,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        if (item.priceDropped)
+          _badge('⬇️ Price Dropped', lightGreen, green),
+        const SizedBox(height: 5),
+        Text(
+          item.retailer,
+          style: TextStyle(
+            color: lightGreen,
+            fontSize: compact ? 14 : 16,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 7),
+        Text(
+          'Current Price: \$${formatMoney(item.currentPrice)}',
+          style: TextStyle(
+            color: lightGreen,
+            fontSize: compact ? 18 : 21,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        Text(
+          item.originalPriceAvailable
+              ? 'Original Price: \$${formatMoney(item.originalPrice)}'
+              : 'Original Price: Not available',
+          style: TextStyle(
+            color: cream.withOpacity(.82),
+            fontSize: compact ? 14 : 16,
+          ),
+        ),
+        Text(
+          item.originalPriceAvailable
+              ? 'Savings: \$${formatMoney(item.originalPrice - item.currentPrice)}'
+              : 'Savings: Tracking...',
+          style: TextStyle(
+            color: gold,
+            fontSize: compact ? 15 : 17,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 10),
+        _dealResultsSection(item),
+        const SizedBox(height: 9),
+        Wrap(
+          spacing: 12,
+          runSpacing: 6,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(trendIcon(item), color: trendColor(item), size: 20),
+                const SizedBox(width: 7),
+                Text(
+                  trendLabel(item),
+                  style: TextStyle(
+                    color: trendColor(item),
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+            Text(
+              'Low: \$${formatMoney(lowestPrice(item))}',
+              style: TextStyle(
+                color: cream.withOpacity(.68),
+                fontSize: 13,
+              ),
+            ),
+            Text(
+              'High: \$${formatMoney(highestPrice(item))}',
+              style: TextStyle(
+                color: cream.withOpacity(.68),
+                fontSize: 13,
+              ),
+            ),
+            Text(
+              'Avg: \$${formatMoney(averagePrice(item))}',
+              style: TextStyle(
+                color: cream.withOpacity(.68),
+                fontSize: 13,
+              ),
+            ),
+            Text(
+              smartPriceInsight(item),
+              style: TextStyle(
+                color: smartPriceInsightColor(item),
+                fontSize: 13,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 9),
+        if (item.priceHistory.isNotEmpty)
+          SizedBox(
+            height: compact ? 44 : 52,
+            child: LineChart(
+              LineChartData(
+                minY: lowestPrice(item).toDouble() - 5,
+                maxY: highestPrice(item).toDouble() + 5,
+                gridData: const FlGridData(show: false),
+                titlesData: const FlTitlesData(show: false),
+                borderData: FlBorderData(show: false),
+                lineBarsData: [
+                  LineChartBarData(
+                    spots: item.priceHistory
+                        .asMap()
+                        .entries
+                        .map(
+                          (entry) => FlSpot(
+                            entry.key.toDouble(),
+                            (entry.value['price'] as num).toDouble(),
+                          ),
+                        )
+                        .toList(),
+                    isCurved: true,
+                    barWidth: 1.8,
+                    color: cream.withOpacity(.92),
+                    dotData: const FlDotData(show: false),
+                    belowBarData: BarAreaData(
+                      show: true,
+                      color: lightGreen.withOpacity(.09),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        const SizedBox(height: 7),
+        Text(
+          'Last checked: ${item.lastChecked}',
+          style: TextStyle(
+            color: cream.withOpacity(.58),
+            fontSize: 12,
+          ),
+        ),
+        Text(
+          'Source: ${item.source}',
+          style: TextStyle(
+            color: cream.withOpacity(.45),
+            fontSize: 11,
+          ),
+        ),
+      ],
+    );
+  }
 
-    page.on('response', async (response) => {
-      try {
-        const responseUrl = response.url();
-        const contentType = response.headers()['content-type'] || '';
 
-        if (!contentType.includes('application/json')) return;
+  Future<void> openDealLink(String link) async {
+    final trimmedLink = link.trim();
 
-        const text = await response.text();
-        const lower = text.toLowerCase();
+    if (trimmedLink.isEmpty) {
+      showMessage('No retailer link available for this deal yet.');
+      return;
+    }
 
-        const matchedKeywords = keywords.filter((k) =>
-          lower.includes(k.toLowerCase())
-        );
+    final uri = Uri.tryParse(trimmedLink);
 
-        if (matchedKeywords.length > 0) {
-          findings.push({
-            url: responseUrl,
-            matchedKeywords,
-            sample: text.slice(0, 2500),
-          });
-        }
-      } catch (_) {}
-    });
+    if (uri == null || !uri.hasScheme) {
+      showMessage('Invalid retailer link.');
+      return;
+    }
 
-    await page.goto(url, {
-      waitUntil: 'domcontentloaded',
-      timeout: 90000,
-    });
+    try {
+      final opened = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
+      );
 
-    await page.waitForTimeout(12000);
-
-    return res.json({
-      status: 'ok',
-      route: 'debug-target-price-keys',
-      findingCount: findings.length,
-      findings: findings.slice(0, 10),
-    });
-  } catch (error) {
-    return res.status(500).json({
-      status: 'error',
-      route: 'debug-target-price-keys',
-      error: error.message,
-    });
-  } finally {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (_) {}
+      if (!opened) {
+        showMessage('Could not open retailer link.');
+      }
+    } catch (e) {
+      print('OPEN DEAL LINK ERROR: $e');
+      showMessage('Could not open retailer link.');
     }
   }
-});
-app.get('/debug-target-redsky', async (req, res) => {
-  const tcin = req.query.tcin || '94784166';
 
-  try {
-    const redskyUrl =
-      `https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1` +
-      `?key=9f36aeafbe60771e321a7cc95a78140772ab3e96` +
-      `&tcin=${encodeURIComponent(tcin)}` +
-      `&store_id=1771` +
-      `&pricing_store_id=1771` +
-      `&has_pricing_store_id=true` +
-      `&has_financing_options=true`;
 
-    const response = await fetch(redskyUrl, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-        Accept: 'application/json',
-      },
-    });
+  Widget _dealResultsSection(ProductItem item) {
+    if (item.dealResults.isEmpty) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: fieldGreen.withOpacity(.7),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: cream.withOpacity(.12)),
+        ),
+        child: Text(
+          'Cross-retailer deals: Searching soon...',
+          style: TextStyle(
+            color: cream.withOpacity(.62),
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      );
+    }
 
-    const text = await response.text();
+    final bestMatches =
+        item.dealResults.where((deal) => deal.confidence >= 80).toList();
 
-    return res.json({
-      status: 'ok',
-      route: 'debug-target-redsky',
-      httpStatus: response.status,
-      includesPrice: text.toLowerCase().includes('price'),
-      includesCurrentRetail: text.toLowerCase().includes('current_retail'),
-      includesTCIN: text.includes(tcin),
-      sample: text.slice(0, 3000),
-    });
-  } catch (error) {
-    return res.status(500).json({
-      status: 'error',
-      route: 'debug-target-redsky',
-      error: error.message,
-    });
+    final possibleMatches =
+        item.dealResults.where((deal) => deal.confidence < 80).toList();
+
+    Widget dealRow(DealResult deal) {
+      final cheaper = deal.price < item.currentPrice;
+
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.03),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: cream.withOpacity(.08)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    cheaper ? Icons.local_offer : Icons.storefront,
+                    size: 16,
+                    color: cheaper ? lightGreen : cream.withOpacity(.6),
+                  ),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: Text(
+                      '${deal.source}: \$${formatMoney(deal.price)} • ${deal.confidence}% match',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: cheaper ? lightGreen : cream.withOpacity(.84),
+                        fontSize: 13,
+                        fontWeight:
+                            cheaper ? FontWeight.bold : FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              if (deal.title.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(
+                  deal.title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: cream.withOpacity(.58),
+                    fontSize: 11,
+                    height: 1.15,
+                  ),
+                ),
+              ],
+              _verificationSignalsChips(deal),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: () => openDealLink(deal.link),
+                  icon: const Icon(Icons.open_in_new, size: 16),
+                  label: const Text('Open Deal'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: lightGreen,
+                    foregroundColor: green,
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: fieldGreen.withOpacity(.85),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: lightGreen.withOpacity(.28)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (bestMatches.isNotEmpty) ...[
+            Text(
+              'Best Matches',
+              style: TextStyle(
+                color: lightGreen,
+                fontSize: 13,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 7),
+            ...bestMatches.take(4).map(dealRow),
+          ],
+          if (possibleMatches.isNotEmpty) ...[
+            if (bestMatches.isNotEmpty) const SizedBox(height: 6),
+            Text(
+              'Possible Matches',
+              style: TextStyle(
+                color: cream.withOpacity(.75),
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 7),
+            ...possibleMatches.take(4).map(dealRow),
+          ],
+        ],
+      ),
+    );
   }
-});
-app.get('/debug-target-price-object', async (req, res) => {
-  const tcin = req.query.tcin || '94784166';
 
-  try {
-    const redskyUrl =
-      `https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1` +
-      `?key=9f36aeafbe60771e321a7cc95a78140772ab3e96` +
-      `&tcin=${encodeURIComponent(tcin)}` +
-      `&store_id=1771` +
-      `&pricing_store_id=1771` +
-      `&has_pricing_store_id=true`;
+  List<String> _signalList(Map<String, dynamic> signals, String key) {
+    final raw = signals[key];
 
-    const response = await fetch(redskyUrl);
+    if (raw is List) {
+      return raw.map((signal) => signal.toString()).toList();
+    }
 
-    const data = await response.json();
-
-    const product =
-      data?.data?.product ||
-      data?.product ||
-      data;
-
-    return res.json({
-      status: 'ok',
-      route: 'debug-target-price-object',
-      tcin,
-      price: product?.price || null,
-      priceInfo: product?.price_info || null,
-      buyBox: product?.buy_box_winner || null,
-      fulfillment: product?.fulfillment || null,
-      item: product?.item || null,
-    });
-  } catch (error) {
-    return res.status(500).json({
-      status: 'error',
-      route: 'debug-target-price-object',
-      error: error.message,
-    });
+    return [];
   }
-});
-app.listen(PORT, () => {
-  console.log(
-    `Server running on port ${PORT}`
-  );
-});
+
+  Widget _verificationSignalsChips(DealResult deal) {
+    final positives = _signalList(deal.verificationSignals, 'positive');
+    final warnings = _signalList(deal.verificationSignals, 'warnings');
+
+    if (positives.isEmpty && warnings.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    Widget chip({
+      required String text,
+      required IconData icon,
+      required Color color,
+    }) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+        decoration: BoxDecoration(
+          color: color.withOpacity(.14),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: color.withOpacity(.72)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 12, color: color),
+            const SizedBox(width: 4),
+            Text(
+              text,
+              style: TextStyle(
+                color: color,
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 7),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        children: [
+          ...positives.map(
+            (signal) => chip(
+              text: signal,
+              icon: Icons.check_circle,
+              color: lightGreen,
+            ),
+          ),
+          ...warnings.map(
+            (signal) => chip(
+              text: signal,
+              icon: Icons.warning_amber_rounded,
+              color: gold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _pill(String text, Color bg, Color fg) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
+      decoration: BoxDecoration(
+        color: bg.withOpacity(.88),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: fg,
+          fontWeight: FontWeight.bold,
+          fontSize: 12,
+        ),
+      ),
+    );
+  }
+
+  Widget _badge(String text, Color bg, Color fg) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: bg.withOpacity(.88),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(color: fg, fontWeight: FontWeight.bold, fontSize: 12),
+      ),
+    );
+  }
+}
