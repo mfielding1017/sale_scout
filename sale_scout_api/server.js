@@ -1116,6 +1116,80 @@ app.get('/debug-target-scripts', async (req, res) => {
     }
   }
 });
+app.get('/debug-target-network', async (req, res) => {
+  const url = req.query.url;
+
+  if (!url) {
+    return res.status(400).json({
+      error: 'Missing Target URL',
+    });
+  }
+
+  let browser;
+
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+      ],
+    });
+
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+    });
+
+    const interestingRequests = [];
+
+    page.on('request', (request) => {
+      const requestUrl = request.url();
+      const lower = requestUrl.toLowerCase();
+
+      if (
+        lower.includes('redsky') ||
+        lower.includes('price') ||
+        lower.includes('tcin') ||
+        lower.includes('product')
+      ) {
+        interestingRequests.push({
+          method: request.method(),
+          url: requestUrl,
+        });
+      }
+    });
+
+    await page.goto(url, {
+      waitUntil: 'networkidle',
+      timeout: 90000,
+    });
+
+    await page.waitForTimeout(7000);
+
+    return res.json({
+      status: 'ok',
+      route: 'debug-target-network',
+      requestCount: interestingRequests.length,
+      requests: interestingRequests.slice(0, 30),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      status: 'error',
+      route: 'debug-target-network',
+      error: error.message,
+    });
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (_) {}
+    }
+  }
+});
 app.listen(PORT, () => {
   console.log(
     `Server running on port ${PORT}`
