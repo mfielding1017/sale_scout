@@ -1507,6 +1507,45 @@ app.get('/debug-target-redsky', async (req, res) => {
     });
   }
 });
+app.get('/debug-target-price-object', async (req, res) => {
+  const tcin = req.query.tcin || '94784166';
+
+  try {
+    const redskyUrl =
+      `https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1` +
+      `?key=9f36aeafbe60771e321a7cc95a78140772ab3e96` +
+      `&tcin=${encodeURIComponent(tcin)}` +
+      `&store_id=1771` +
+      `&pricing_store_id=1771` +
+      `&has_pricing_store_id=true`;
+
+    const response = await fetch(redskyUrl);
+
+    const data = await response.json();
+
+    const product =
+      data?.data?.product ||
+      data?.product ||
+      data;
+
+    return res.json({
+      status: 'ok',
+      route: 'debug-target-price-object',
+      tcin,
+      price: product?.price || null,
+      priceInfo: product?.price_info || null,
+      buyBox: product?.buy_box_winner || null,
+      fulfillment: product?.fulfillment || null,
+      item: product?.item || null,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      status: 'error',
+      route: 'debug-target-price-object',
+      error: error.message,
+    });
+  }
+});
 app.listen(PORT, () => {
   console.log(
     `Server running on port ${PORT}`
