@@ -31,12 +31,14 @@ app.get('/product', async (req, res) => {
     let product;
 
     if (url.includes('nike.com')) {
-      product = await scrapeNike(url);
-    } else {
-      return res.status(400).json({
-        error: 'Unsupported retailer for now',
-      });
-    }
+  product = await scrapeNike(url);
+} else if (url.includes('target.com')) {
+  product = await scrapeTarget(url);
+} else {
+  return res.status(400).json({
+    error: 'Unsupported retailer for now',
+  });
+}
 
     return res.json(product);
   } catch (error) {
