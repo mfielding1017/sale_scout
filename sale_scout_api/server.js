@@ -713,217 +713,83 @@ async function scrapeNike(url) {
 }
 
 async function scrapeTarget(url) {
-  let browser;
-
   try {
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-      ],
+    const tcinMatch = url.match(/A-(\d+)/i);
+
+    if (!tcinMatch) {
+      throw new Error('Could not extract Target TCIN');
+    }
+
+    const tcin = tcinMatch[1];
+
+    const redskyUrl =
+      `https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1` +
+      `?key=9f36aeafbe60771e321a7cc95a78140772ab3e96` +
+      `&tcin=${encodeURIComponent(tcin)}` +
+      `&store_id=1771` +
+      `&pricing_store_id=1771` +
+      `&has_pricing_store_id=true`;
+
+    const response = await fetch(redskyUrl, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+        Accept: 'application/json',
+      },
     });
 
-    const page = await browser.newPage({
-      viewport: { width: 1200, height: 900 },
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-    });
+    if (!response.ok) {
+      throw new Error(`Target API failed: ${response.status}`);
+    }
 
-    await page.goto(url, {
-      waitUntil: 'domcontentloaded',
-      timeout: 90000,
-    });
+    const data = await response.json();
 
-    await page.waitForTimeout(7000);
+    const product = data?.data?.product;
 
-    const result = await page.evaluate(() => {
-      const cleanText = (value) =>
-        String(value || '').replace(/\s+/g, ' ').trim();
+    if (!product) {
+      throw new Error('No product found in Target API response');
+    }
 
-      const cleanPrice = (value) => {
-        const match = String(value || '')
-          .replace(/,/g, '')
-          .match(/\$?\s*([0-9]+(?:\.[0-9]{1,2})?)/);
+    const priceData = product.price || {};
 
-        return match ? Number(match[1]) : null;
-      };
+    const currentPrice =
+      parseFloat(priceData.current_retail) ||
+      parseFloat(priceData.formatted_current_price?.replace('$', ''));
 
-      const getMeta = (name) => {
-        const el =
-          document.querySelector(`meta[property="${name}"]`) ||
-          document.querySelector(`meta[name="${name}"]`) ||
-          document.querySelector(`meta[itemprop="${name}"]`);
+    const originalPrice =
+      parseFloat(priceData.reg_retail) ||
+      parseFloat(priceData.formatted_comparison_price?.replace('$', ''));
 
-        return el ? el.getAttribute('content') : '';
-      };
-
-      const title =
-        getMeta('og:title') ||
-        document.querySelector('h1')?.innerText ||
-        document.title ||
-        'Target Product';
-
-      const imageUrl =
-        getMeta('og:image') ||
-        getMeta('twitter:image') ||
-        document.querySelector('img')?.src ||
-        '';
-
-      let currentPrice = null;
-      let originalPrice = null;
-      let priceSource = 'none';
-
-      const metaPrice =
-        getMeta('price') ||
-        getMeta('product:price:amount') ||
-        getMeta('og:price:amount');
-
-      if (metaPrice) {
-        currentPrice = cleanPrice(metaPrice);
-        if (currentPrice) priceSource = 'meta_price';
-      }
-
-      if (!currentPrice) {
-        const jsonLdScripts = Array.from(
-          document.querySelectorAll('script[type="application/ld+json"]')
-        );
-
-        for (const script of jsonLdScripts) {
-          try {
-            const parsed = JSON.parse(script.textContent || '{}');
-            const items = Array.isArray(parsed) ? parsed : [parsed];
-
-            for (const item of items) {
-              const offers = item.offers || item.offers?.[0];
-
-              if (offers) {
-                const offer = Array.isArray(offers) ? offers[0] : offers;
-                const possiblePrice = offer.price || offer.lowPrice;
-
-                if (possiblePrice) {
-                  currentPrice = cleanPrice(possiblePrice);
-                  if (currentPrice) {
-                    priceSource = 'json_ld_offer';
-                    break;
-                  }
-                }
-              }
-            }
-
-            if (currentPrice) break;
-          } catch (_) {}
-        }
-      }
-
-      const fullHtml = document.documentElement.innerHTML || '';
-      const fullText = document.body.innerText || '';
-
-      if (!currentPrice) {
-        const regexCandidates = [
-          /"current_retail"\s*:\s*([0-9]+(?:\.[0-9]{1,2})?)/i,
-          /"formatted_current_price"\s*:\s*"\$?([0-9]+(?:\.[0-9]{1,2})?)"/i,
-          /"price"\s*:\s*"\$?([0-9]+(?:\.[0-9]{1,2})?)"/i,
-          /"currentPrice"\s*:\s*"\$?([0-9]+(?:\.[0-9]{1,2})?)"/i,
-        ];
-
-        for (const regex of regexCandidates) {
-          const match = fullHtml.match(regex);
-          if (match && match[1]) {
-            currentPrice = Number(match[1]);
-            priceSource = 'embedded_json_regex';
-            break;
-          }
-        }
-      }
-
-      if (!currentPrice) {
-        const visiblePriceCandidates = Array.from(
-          document.querySelectorAll('body *')
-        )
-          .map((el) => {
-            const rect = el.getBoundingClientRect();
-
-            return {
-              text: cleanText(el.innerText || el.textContent || ''),
-              visible:
-                rect.width > 0 &&
-                rect.height > 0 &&
-                rect.top >= 0 &&
-                rect.top < 1000,
-            };
-          })
-          .filter((item) => item.visible)
-          .filter((item) => item.text.includes('$'))
-          .filter((item) => item.text.length <= 80)
-          .map((item) => cleanPrice(item.text))
-          .filter((price) => price && price >= 1 && price <= 5000);
-
-        const uniquePrices = [...new Set(visiblePriceCandidates)].sort(
-          (a, b) => a - b
-        );
-
-        if (uniquePrices.length > 0) {
-          currentPrice = uniquePrices[0];
-          originalPrice =
-            uniquePrices.length > 1 ? uniquePrices[uniquePrices.length - 1] : null;
-          priceSource = 'visible_price_candidates';
-        }
-      }
-
-      const pageText = `${fullText} ${fullHtml}`;
-
-      const tcinMatch =
-        pageText.match(/TCIN[^0-9]{0,20}([0-9]{6,12})/i) ||
-        pageText.match(/"tcin"\s*:\s*"?(\d{6,12})"?/i);
-
-      return {
-        title: cleanText(title),
-        imageUrl,
-        currentPrice: currentPrice || 0,
-        originalPrice: originalPrice || null,
-        sku: tcinMatch ? tcinMatch[1] : null,
-        priceSource,
-      };
-    });
-
-    const finalCurrentPrice = Math.round(Number(result.currentPrice || 0));
-    const finalOriginalPrice = result.originalPrice
-      ? Math.round(Number(result.originalPrice))
-      : null;
+    const imageUrl =
+      product?.item?.enrichment?.images?.primary_image_url ||
+      null;
 
     return {
-      title: cleanText(result.title)
-        .replace(/: Target$/, '')
-        .replace('| Target', '')
-        .trim(),
-      sku: result.sku || null,
+      title: product.item?.product_description?.title || 'Target Product',
+      sku: tcin,
       retailer: 'Target',
-      currentPrice: finalCurrentPrice || 0,
-      originalPrice:
-        finalOriginalPrice && finalOriginalPrice > finalCurrentPrice
-          ? finalOriginalPrice
-          : null,
-      originalPriceAvailable: Boolean(
-        finalOriginalPrice && finalOriginalPrice > finalCurrentPrice
-      ),
-      imageUrl: result.imageUrl || '',
-      source: 'target_price_extraction_v2',
-      debugPriceSource: result.priceSource,
+      currentPrice: currentPrice || 0,
+      originalPrice: originalPrice || null,
+      originalPriceAvailable: !!originalPrice,
+      imageUrl,
+      source: 'target_redsky_api_v1',
     };
-  } finally {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (closeError) {
-        console.error('Browser close failed:', closeError.message);
-      }
-    }
+  } catch (error) {
+    console.error('TARGET SCRAPER ERROR:', error.message);
+
+    return {
+      title: 'Target Product',
+      sku: null,
+      retailer: 'Target',
+      currentPrice: 0,
+      originalPrice: null,
+      originalPriceAvailable: false,
+      imageUrl: null,
+      source: 'target_redsky_api_failed',
+      error: error.message,
+    };
   }
-}
-app.get('/debug', (req, res) => {
+}app.get('/debug', (req, res) => {
   res.json({
     status: 'ok',
     version: 'stable_nike_links_verification',
