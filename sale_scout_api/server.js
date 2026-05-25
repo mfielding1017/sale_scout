@@ -727,25 +727,9 @@ async function scrapeTarget(url) {
     });
 
     const page = await browser.newPage({
-      viewport: {
-        width: 1200,
-        height: 900,
-      },
-
+      viewport: { width: 1200, height: 900 },
       userAgent:
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-    });
-
-    await page.route('**/*', (route) => {
-      const type = route.request().resourceType();
-
-      if (
-        ['image', 'font', 'media'].includes(type)
-      ) {
-        route.abort();
-      } else {
-        route.continue();
-      }
     });
 
     await page.goto(url, {
@@ -753,182 +737,188 @@ async function scrapeTarget(url) {
       timeout: 90000,
     });
 
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(7000);
 
     const result = await page.evaluate(() => {
+      const cleanText = (value) =>
+        String(value || '').replace(/\s+/g, ' ').trim();
+
+      const cleanPrice = (value) => {
+        const match = String(value || '')
+          .replace(/,/g, '')
+          .match(/\$?\s*([0-9]+(?:\.[0-9]{1,2})?)/);
+
+        return match ? Number(match[1]) : null;
+      };
+
       const getMeta = (name) => {
         const el =
-          document.querySelector(
-            `meta[property="${name}"]`
-          ) ||
-          document.querySelector(
-            `meta[name="${name}"]`
-          );
+          document.querySelector(`meta[property="${name}"]`) ||
+          document.querySelector(`meta[name="${name}"]`) ||
+          document.querySelector(`meta[itemprop="${name}"]`);
 
-        return el
-          ? el.getAttribute('content')
-          : '';
+        return el ? el.getAttribute('content') : '';
       };
 
       const title =
         getMeta('og:title') ||
-        document.querySelector('h1')
-          ?.innerText ||
+        document.querySelector('h1')?.innerText ||
         document.title ||
         'Target Product';
 
       const imageUrl =
         getMeta('og:image') ||
         getMeta('twitter:image') ||
-        document.querySelector('img')
-          ?.src ||
+        document.querySelector('img')?.src ||
         '';
 
-      const visiblePriceCandidates =
-        Array.from(
+      let currentPrice = null;
+      let originalPrice = null;
+      let priceSource = 'none';
+
+      const metaPrice =
+        getMeta('price') ||
+        getMeta('product:price:amount') ||
+        getMeta('og:price:amount');
+
+      if (metaPrice) {
+        currentPrice = cleanPrice(metaPrice);
+        if (currentPrice) priceSource = 'meta_price';
+      }
+
+      if (!currentPrice) {
+        const jsonLdScripts = Array.from(
+          document.querySelectorAll('script[type="application/ld+json"]')
+        );
+
+        for (const script of jsonLdScripts) {
+          try {
+            const parsed = JSON.parse(script.textContent || '{}');
+            const items = Array.isArray(parsed) ? parsed : [parsed];
+
+            for (const item of items) {
+              const offers = item.offers || item.offers?.[0];
+
+              if (offers) {
+                const offer = Array.isArray(offers) ? offers[0] : offers;
+                const possiblePrice = offer.price || offer.lowPrice;
+
+                if (possiblePrice) {
+                  currentPrice = cleanPrice(possiblePrice);
+                  if (currentPrice) {
+                    priceSource = 'json_ld_offer';
+                    break;
+                  }
+                }
+              }
+            }
+
+            if (currentPrice) break;
+          } catch (_) {}
+        }
+      }
+
+      const fullHtml = document.documentElement.innerHTML || '';
+      const fullText = document.body.innerText || '';
+
+      if (!currentPrice) {
+        const regexCandidates = [
+          /"current_retail"\s*:\s*([0-9]+(?:\.[0-9]{1,2})?)/i,
+          /"formatted_current_price"\s*:\s*"\$?([0-9]+(?:\.[0-9]{1,2})?)"/i,
+          /"price"\s*:\s*"\$?([0-9]+(?:\.[0-9]{1,2})?)"/i,
+          /"currentPrice"\s*:\s*"\$?([0-9]+(?:\.[0-9]{1,2})?)"/i,
+        ];
+
+        for (const regex of regexCandidates) {
+          const match = fullHtml.match(regex);
+          if (match && match[1]) {
+            currentPrice = Number(match[1]);
+            priceSource = 'embedded_json_regex';
+            break;
+          }
+        }
+      }
+
+      if (!currentPrice) {
+        const visiblePriceCandidates = Array.from(
           document.querySelectorAll('body *')
         )
           .map((el) => {
-            const rect =
-              el.getBoundingClientRect();
+            const rect = el.getBoundingClientRect();
 
             return {
-              text:
-                (
-                  el.innerText ||
-                  el.textContent ||
-                  ''
-                ).trim(),
-
+              text: cleanText(el.innerText || el.textContent || ''),
               visible:
                 rect.width > 0 &&
                 rect.height > 0 &&
                 rect.top >= 0 &&
-                rect.top < 900,
+                rect.top < 1000,
             };
           })
           .filter((item) => item.visible)
-          .filter((item) =>
-            item.text.includes('$')
-          )
-          .filter(
-            (item) => item.text.length <= 120
-          );
+          .filter((item) => item.text.includes('$'))
+          .filter((item) => item.text.length <= 80)
+          .map((item) => cleanPrice(item.text))
+          .filter((price) => price && price >= 1 && price <= 5000);
 
-      const priceCandidates =
-        visiblePriceCandidates
-          .map((item) => {
-            const match = String(
-              item.text || ''
-            )
-              .replace(/,/g, '')
-              .match(
-                /\$?\s?([0-9]+(?:\.[0-9]{1,2})?)/
-              );
-
-            return match
-              ? Number(match[1])
-              : null;
-          })
-          .filter(
-            (price) =>
-              price &&
-              price >= 1 &&
-              price <= 5000
-          );
-
-      const uniquePrices = [
-        ...new Set(priceCandidates),
-      ].sort((a, b) => a - b);
-
-      const pageText = `${
-        document.body.innerText || ''
-      } ${
-        document.documentElement.innerHTML || ''
-      }`;
-
-      const tcinMatch =
-        pageText.match(
-          /TCIN[^0-9]{0,20}([0-9]{6,12})/i
-        ) ||
-        pageText.match(
-          /"tcin"\s*:\s*"?(\d{6,12})"?/i
+        const uniquePrices = [...new Set(visiblePriceCandidates)].sort(
+          (a, b) => a - b
         );
 
+        if (uniquePrices.length > 0) {
+          currentPrice = uniquePrices[0];
+          originalPrice =
+            uniquePrices.length > 1 ? uniquePrices[uniquePrices.length - 1] : null;
+          priceSource = 'visible_price_candidates';
+        }
+      }
+
+      const pageText = `${fullText} ${fullHtml}`;
+
+      const tcinMatch =
+        pageText.match(/TCIN[^0-9]{0,20}([0-9]{6,12})/i) ||
+        pageText.match(/"tcin"\s*:\s*"?(\d{6,12})"?/i);
+
       return {
-        title,
+        title: cleanText(title),
         imageUrl,
-
-        currentPrice:
-          uniquePrices[0] || 0,
-
-        originalPrice:
-          uniquePrices.length > 1
-            ? uniquePrices[
-                uniquePrices.length - 1
-              ]
-            : null,
-
-        sku: tcinMatch
-          ? tcinMatch[1]
-          : null,
+        currentPrice: currentPrice || 0,
+        originalPrice: originalPrice || null,
+        sku: tcinMatch ? tcinMatch[1] : null,
+        priceSource,
       };
     });
 
-    const finalCurrentPrice =
-      Math.round(
-        Number(result.currentPrice || 0)
-      );
-
-    const finalOriginalPrice =
-      result.originalPrice
-        ? Math.round(
-            Number(result.originalPrice)
-          )
-        : null;
+    const finalCurrentPrice = Math.round(Number(result.currentPrice || 0));
+    const finalOriginalPrice = result.originalPrice
+      ? Math.round(Number(result.originalPrice))
+      : null;
 
     return {
       title: cleanText(result.title)
         .replace(/: Target$/, '')
         .replace('| Target', '')
         .trim(),
-
       sku: result.sku || null,
-
       retailer: 'Target',
-
-      currentPrice:
-        finalCurrentPrice || 0,
-
+      currentPrice: finalCurrentPrice || 0,
       originalPrice:
-        finalOriginalPrice &&
-        finalOriginalPrice >
-          finalCurrentPrice
+        finalOriginalPrice && finalOriginalPrice > finalCurrentPrice
           ? finalOriginalPrice
           : null,
-
-      originalPriceAvailable:
-        Boolean(
-          finalOriginalPrice &&
-            finalOriginalPrice >
-              finalCurrentPrice
-        ),
-
-      imageUrl:
-        result.imageUrl || '',
-
-      source:
-        'target_basic_scraper_v1',
+      originalPriceAvailable: Boolean(
+        finalOriginalPrice && finalOriginalPrice > finalCurrentPrice
+      ),
+      imageUrl: result.imageUrl || '',
+      source: 'target_price_extraction_v2',
+      debugPriceSource: result.priceSource,
     };
   } finally {
     if (browser) {
       try {
         await browser.close();
       } catch (closeError) {
-        console.error(
-          'Browser close failed:',
-          closeError.message
-        );
+        console.error('Browser close failed:', closeError.message);
       }
     }
   }
