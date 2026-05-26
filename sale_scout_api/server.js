@@ -1425,8 +1425,11 @@ app.get('/debug-target-price-object', async (req, res) => {
     });
   }
 });
-app.get('/test-push', async (req, res) => {
+app.get('/send-price-drop-push', async (req, res) => {
   const token = req.query.token;
+  const title = req.query.title || 'Tracked item';
+  const oldPrice = req.query.oldPrice;
+  const newPrice = req.query.newPrice;
 
   if (!token) {
     return res.status(400).json({
@@ -1437,36 +1440,32 @@ app.get('/test-push', async (req, res) => {
   try {
     const message = {
       notification: {
-        title: 'Sale Scout Alert',
-        body: '🔥 Test push notification working!',
+        title: '🔥 Price Drop Detected',
+        body: `${title} dropped from $${oldPrice} to $${newPrice}`,
       },
-
       webpush: {
         notification: {
           icon: '/icons/Icon-192.png',
         },
       },
-
       token,
     };
 
-    const response = await admin
-      .messaging()
-      .send(message);
+    const response = await admin.messaging().send(message);
 
     return res.json({
       success: true,
       response,
     });
   } catch (error) {
-    console.error('PUSH ERROR:', error);
+    console.error('PRICE DROP PUSH ERROR:', error);
 
     return res.status(500).json({
       error: error.message,
     });
   }
-});
-app.listen(PORT, () => {
+  
+});app.listen(PORT, () => {
   console.log(
     `Server running on port ${PORT}`
   );
