@@ -1441,7 +1441,7 @@ app.get('/send-price-drop-push', async (req, res) => {
     const message = {
       notification: {
         title: '🔥 Price Drop Detected',
-        body: `${title} dropped from $${oldPrice} to $${newPrice}`,
+        body: 'Price drop detected on tracked item',
       },
       webpush: {
         notification: {
@@ -1464,7 +1464,7 @@ app.get('/send-price-drop-push', async (req, res) => {
       error: error.message,
     });
   }
-  
+
 });app.listen(PORT, () => {
   console.log(
     `Server running on port ${PORT}`
