@@ -1,11 +1,18 @@
 const express = require('express');
 const cors = require('cors');
-
+const admin = require('firebase-admin');
 process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
 
 const { chromium } = require('playwright');
 
 const app = express();
+admin.initializeApp({
+  credential: admin.credential.cert({
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+  }),
+});
 app.use(cors());
 
 const PORT = process.env.PORT || 3000;
@@ -1414,6 +1421,47 @@ app.get('/debug-target-price-object', async (req, res) => {
     return res.status(500).json({
       status: 'error',
       route: 'debug-target-price-object',
+      error: error.message,
+    });
+  }
+});
+app.get('/test-push', async (req, res) => {
+  const token = req.query.token;
+
+  if (!token) {
+    return res.status(400).json({
+      error: 'Missing FCM token',
+    });
+  }
+
+  try {
+    const message = {
+      notification: {
+        title: 'Sale Scout Alert',
+        body: '🔥 Test push notification working!',
+      },
+
+      webpush: {
+        notification: {
+          icon: '/icons/Icon-192.png',
+        },
+      },
+
+      token,
+    };
+
+    const response = await admin
+      .messaging()
+      .send(message);
+
+    return res.json({
+      success: true,
+      response,
+    });
+  } catch (error) {
+    console.error('PUSH ERROR:', error);
+
+    return res.status(500).json({
       error: error.message,
     });
   }
