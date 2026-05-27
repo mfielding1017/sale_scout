@@ -6,6 +6,7 @@ import 'dart:html' as html;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -479,7 +480,12 @@ class _HomePageState extends State<HomePage> {
   bool apiScanInProgress = false;
   bool showDropAlert = false;
   final Set<String> expandedDealKeys = <String>{};
+  final Set<String> expandedItemKeys = <String>{};
   List<Map<String, dynamic>> alertHistory = [];
+  String notificationStatus = 'Checking notification status...';
+  bool notificationPermissionRequested = false;
+  String fcmStatus = 'Push registration not started';
+  String? fcmToken;
 
   String plan = 'Scout';
   int itemLimit = 5;
@@ -499,6 +505,7 @@ class _HomePageState extends State<HomePage> {
 
     startMonitoring();
     requestBrowserNotificationPermission();
+    registerForFcmPushNotifications();
   }
 
   @override
@@ -833,9 +840,32 @@ class _HomePageState extends State<HomePage> {
         final updated = await getProductFromApi(item.url, oldItem: item);
 
         if (updated != null && updated.priceDropped) {
-          anyDrop = true;
-          addPriceDropAlert(oldItem: item, newItem: updated);
-        }
+  anyDrop = true;
+
+  addPriceDropAlert(oldItem: item, newItem: updated);
+
+  try {
+    final userSnapshot = await userDoc.get();
+    final userData = userSnapshot.data();
+
+    final token = userData?['lastFcmToken'];
+
+    if (token != null && token.toString().isNotEmpty) {
+      final pushUrl =
+          'https://sale-scout-api.onrender.com/send-price-drop-push'
+          '?token=$token'
+          '&title=${Uri.encodeComponent(updated.title)}'
+          '&oldPrice=${item.currentPrice}'
+          '&newPrice=${updated.currentPrice}';
+
+      await http.get(Uri.parse(pushUrl));
+
+      print('SALE SCOUT PUSH SENT');
+    }
+  } catch (e) {
+    print('SALE SCOUT PUSH ERROR: $e');
+  }
+}
 
         updatedItems.add(updated ?? item);
 
@@ -878,14 +908,133 @@ class _HomePageState extends State<HomePage> {
     await saveUserData();
   }
 
+  Future<void> registerForFcmPushNotifications() async {
+    try {
+      if (!mounted) return;
+
+      setState(() {
+        fcmStatus = 'Registering browser for push alerts...';
+      });
+
+      final messaging = FirebaseMessaging.instance;
+
+      final settings = await messaging.requestPermission(
+        alert: true,
+        badge: true,
+        sound: true,
+      );
+
+      if (settings.authorizationStatus == AuthorizationStatus.denied) {
+        if (!mounted) return;
+        setState(() {
+          fcmStatus = 'Push notifications blocked';
+        });
+        return;
+      }
+
+      final token = await messaging.getToken(
+        vapidKey: 'BAUnjJMlnr_yr9N91NssC4gEG-o6KxaIYUsl5bqISEpA2C5GNzZZ0RGRONH13ajdG6-JKGmCMbsth9VsIxVyzEc',
+      );
+
+      if (token == null || token.isEmpty) {
+        if (!mounted) return;
+        setState(() {
+          fcmStatus = 'Push token not available yet';
+        });
+        return;
+      }
+
+      fcmToken = token;
+
+      await userDoc.set({
+        'lastFcmToken': token,
+        'fcmTokens': FieldValue.arrayUnion([token]),
+        'fcmTokenUpdatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      if (!mounted) return;
+      setState(() {
+        fcmStatus = 'Push device registered';
+      });
+
+      print('FCM TOKEN SAVED: $token');
+    } catch (e) {
+      print('FCM REGISTRATION ERROR: $e');
+      if (!mounted) return;
+      setState(() {
+        fcmStatus = 'Push registration failed';
+      });
+    }
+  }
+
+  void updateNotificationStatus() {
+    if (!mounted) return;
+
+    String status;
+
+    if (!html.Notification.supported) {
+      status = 'Browser notifications are not supported in this browser.';
+    } else if (html.Notification.permission == 'granted') {
+      status = 'Browser notifications allowed';
+    } else if (html.Notification.permission == 'denied') {
+      status = 'Browser notifications blocked';
+    } else {
+      status = 'Browser notifications not enabled yet';
+    }
+
+    setState(() {
+      notificationStatus = status;
+    });
+  }
+
   Future<void> requestBrowserNotificationPermission() async {
     try {
-      if (html.Notification.supported &&
-          html.Notification.permission == 'default') {
+      if (!html.Notification.supported) {
+        updateNotificationStatus();
+        return;
+      }
+
+      if (html.Notification.permission == 'default') {
+        notificationPermissionRequested = true;
         await html.Notification.requestPermission();
       }
+
+      updateNotificationStatus();
     } catch (e) {
       print('BROWSER NOTIFICATION PERMISSION ERROR: $e');
+      if (!mounted) return;
+
+      setState(() {
+        notificationStatus = 'Notification permission check failed';
+      });
+    }
+  }
+
+  void sendTestBrowserNotification() {
+    try {
+      if (!html.Notification.supported) {
+        showMessage('This browser does not support notifications.');
+        updateNotificationStatus();
+        return;
+      }
+
+      if (html.Notification.permission != 'granted') {
+        showMessage('Notifications are not enabled yet.');
+        requestBrowserNotificationPermission();
+        return;
+      }
+
+      html.Notification(
+        'Sale Scout Test Alert',
+        body: 'Browser notifications are working.',
+        icon: 'assets/sale_scout_logo.png',
+      );
+
+      showMessage('Test notification sent.');
+      updateNotificationStatus();
+    } catch (e) {
+      print('TEST BROWSER NOTIFICATION ERROR: $e');
+      showMessage('Test notification failed.');
     }
   }
 
@@ -1297,349 +1446,1012 @@ class _HomePageState extends State<HomePage> {
     await FirebaseAuth.instance.signOut();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final email = FirebaseAuth.instance.currentUser?.email ?? '';
-    final remaining = itemLimit - trackedItems.length;
-    final isPhone = MediaQuery.of(context).size.width < 600;
+  Widget _notificationStatusCard(bool isPhone) {
+    final allowed = notificationStatus == 'Browser notifications allowed';
+    final blocked = notificationStatus == 'Browser notifications blocked';
 
-    return Scaffold(
-      backgroundColor: green,
-      body: SafeArea(
-        child: Padding(
-          padding: EdgeInsets.fromLTRB(
-            isPhone ? 14 : 22,
-            isPhone ? 6 : 10,
-            isPhone ? 14 : 22,
-            isPhone ? 12 : 22,
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: fieldGreen.withOpacity(.82),
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(
+          color: allowed
+              ? lightGreen.withOpacity(.28)
+              : blocked
+                  ? Colors.redAccent.withOpacity(.32)
+                  : gold.withOpacity(.28),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            allowed
+                ? Icons.notifications_active
+                : blocked
+                    ? Icons.notifications_off
+                    : Icons.notifications_none,
+            color: allowed
+                ? lightGreen
+                : blocked
+                    ? Colors.redAccent
+                    : gold,
+            size: 18,
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (showDropAlert)
-                Container(
-                  width: double.infinity,
-                  margin: const EdgeInsets.only(bottom: 8),
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: lightGreen,
-                    borderRadius: BorderRadius.circular(16),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  notificationStatus,
+                  style: TextStyle(
+                    color: cream.withOpacity(.82),
+                    fontSize: isPhone ? 12 : 13,
+                    fontWeight: FontWeight.bold,
                   ),
-                  child: Text(
-                    '🚨 Price drop detected!',
-                    textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  fcmStatus,
+                  style: TextStyle(
+                    color: cream.withOpacity(.55),
+                    fontSize: isPhone ? 10 : 11,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          TextButton(
+            onPressed: allowed
+                ? sendTestBrowserNotification
+                : requestBrowserNotificationPermission,
+            style: TextButton.styleFrom(
+              foregroundColor: allowed ? green : cream,
+              backgroundColor: allowed ? lightGreen : Colors.white.withOpacity(.06),
+              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(9),
+              ),
+            ),
+            child: Text(
+              allowed ? 'Test' : 'Enable',
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _dashboardStatCard({
+    required IconData icon,
+    required String label,
+    required String value,
+    required Color accent,
+  }) {
+    return Expanded(
+      child: Container(
+        constraints: const BoxConstraints(minHeight: 78),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: cardGreen,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: cream.withOpacity(.12)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(.18),
+              blurRadius: 12,
+              offset: const Offset(0, 5),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(
+                color: accent.withOpacity(.16),
+                borderRadius: BorderRadius.circular(13),
+              ),
+              child: Icon(icon, color: accent, size: 20),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    value,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      color: green,
+                      color: cream,
                       fontSize: 18,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
-                ),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Expanded(
-                    child: Text(
-                      email,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: cream.withOpacity(.7),
-                        fontSize: 12,
-                      ),
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: logout,
-                    child: Text(
-                      'Logout',
-                      style: TextStyle(color: cream),
-                    ),
-                  ),
-                ],
-              ),
-              Center(
-                child: Image.asset(
-                  'assets/sale_scout_logo.png',
-                  height: isPhone ? 85 : 165,
-                ),
-              ),
-              SizedBox(height: isPhone ? 4 : 8),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  _pill('🎖 $plan Plan', lightGreen, green),
-                  _pill(
-                    'Watching ${trackedItems.length}/$itemLimit',
-                    cream,
-                    green,
-                  ),
-                ],
-              ),
-              SizedBox(height: isPhone ? 8 : 10),
-              Wrap(
-                spacing: 10,
-                runSpacing: 8,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 6,
-                    ),
-                    decoration: BoxDecoration(
-                      color: lightGreen.withOpacity(.16),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: lightGreen.withOpacity(.42)),
-                    ),
-                    child: Text(
-                      apiScanInProgress
-                          ? '🟡 Scan Running'
-                          : '🟢 Monitoring Active',
-                      style: TextStyle(
-                        color: lightGreen,
-                        fontWeight: FontWeight.bold,
-                        fontSize: isPhone ? 12 : 14,
-                      ),
-                    ),
-                  ),
+                  const SizedBox(height: 2),
                   Text(
-                    'Hourly monitoring active',
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      color: cream.withOpacity(.68),
-                      fontSize: isPhone ? 12 : 14,
+                      color: cream.withOpacity(.58),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                 ],
               ),
-              SizedBox(height: 6),
-              if (alertHistory.isNotEmpty)
-                InkWell(
-                  borderRadius: BorderRadius.circular(16),
-                  onTap: showAlertsSheet,
-                  child: Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 11,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: fieldGreen.withOpacity(.88),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: lightGreen.withOpacity(.24)),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.notifications_active,
-                          color: lightGreen,
-                          size: 18,
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            unreadAlertCount() > 0
-                                ? '${unreadAlertCount()} new price-drop alert${unreadAlertCount() == 1 ? '' : 's'}'
-                                : '${alertHistory.length} saved price-drop alert${alertHistory.length == 1 ? '' : 's'}',
-                            style: TextStyle(
-                              color: cream,
-                              fontSize: 13,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ),
-                        Icon(
-                          Icons.keyboard_arrow_up,
-                          color: cream.withOpacity(.55),
-                          size: 18,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              SizedBox(height: isPhone ? 8 : 12),
-              TextField(
-                controller: urlController,
-                style: TextStyle(color: cream, fontSize: isPhone ? 14 : 17),
-                decoration: InputDecoration(
-                  hintText: remaining > 0
-                      ? 'Paste product URL...'
-                      : 'Scout item limit reached',
-                  hintStyle: TextStyle(color: cream.withOpacity(.52)),
-                  prefixIcon: Icon(Icons.link, color: cream.withOpacity(.64)),
-                  filled: true,
-                  fillColor: fieldGreen,
-                  contentPadding: EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: isPhone ? 12 : 16,
-                  ),
-                  enabled: remaining > 0 && !apiScanInProgress,
-                  enabledBorder: OutlineInputBorder(
-                    borderSide: BorderSide(color: cream.withOpacity(.28)),
-                    borderRadius: BorderRadius.circular(18),
-                  ),
-                  disabledBorder: OutlineInputBorder(
-                    borderSide: BorderSide(color: gold.withOpacity(.5)),
-                    borderRadius: BorderRadius.circular(18),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderSide: BorderSide(color: lightGreen, width: 1.8),
-                    borderRadius: BorderRadius.circular(18),
-                  ),
-                ),
-              ),
-              SizedBox(height: 6),
-              SizedBox(
-                width: double.infinity,
-                height: isPhone ? 48 : 56,
-                child: ElevatedButton.icon(
-                  onPressed:
-                      (isLoading || apiScanInProgress) ? null : fetchProduct,
-                  icon: isLoading
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.travel_explore),
-                  label: Text(
-                    isLoading || apiScanInProgress
-                        ? 'Scouting... please wait'
-                        : (remaining > 0 ? 'Track Item' : 'Upgrade Tracking'),
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: isPhone ? 14 : 19,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: lightGreen,
-                    foregroundColor: green,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(18),
-                    ),
-                  ),
-                ),
-              ),
-              SizedBox(height: 4),
-              SizedBox(
-                width: double.infinity,
-                height: isPhone ? 44 : 50,
-                child: OutlinedButton.icon(
-                  onPressed: (isRefreshing || apiScanInProgress)
-                      ? null
-                      : () => refreshPrices(),
-                  icon: const Icon(Icons.refresh),
-                  label: Text(
-                    isRefreshing || apiScanInProgress
-                        ? 'Scanning Prices...'
-                        : 'Scan Now',
-                    style: TextStyle(fontSize: isPhone ? 14 : 16),
-                  ),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: cream,
-                    side: BorderSide(color: cream.withOpacity(.28)),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                  ),
-                ),
-              ),
-              SizedBox(height: isPhone ? 8 : 14),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'Tracked Items',
-                    style: TextStyle(
-                      color: cream,
-                      fontSize: isPhone ? 23 : 28,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  Text(
-                    '$remaining left',
-                    style: TextStyle(
-                      color: remaining > 0 ? lightGreen : gold,
-                      fontWeight: FontWeight.bold,
-                      fontSize: isPhone ? 12 : 14,
-                    ),
-                  ),
-                ],
-              ),
-              SizedBox(height: 6),
-              Expanded(
-                child: trackedItems.isEmpty
-                    ? Center(
-                        child: Container(
-                          padding: EdgeInsets.all(isPhone ? 16 : 22),
-                          decoration: BoxDecoration(
-                            color: cardGreen,
-                            borderRadius: BorderRadius.circular(22),
-                            border: Border.all(color: cream.withOpacity(.14)),
-                          ),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.travel_explore,
-                                color: lightGreen,
-                                size: isPhone ? 34 : 42,
-                              ),
-                              const SizedBox(height: 12),
-                              Text(
-                                'Scout your first deal',
-                                style: TextStyle(
-                                  color: cream,
-                                  fontSize: isPhone ? 19 : 22,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              Text(
-                                'Paste a product URL above. Your Scout plan includes $itemLimit tracked items.',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(
-                                  color: cream.withOpacity(.68),
-                                  fontSize: isPhone ? 13 : 15,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      )
-                    : ListView.builder(
-                        physics: const AlwaysScrollableScrollPhysics(),
-                        itemCount: trackedItems.length,
-                        itemBuilder: (context, index) {
-                          final item = trackedItems[index];
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
-                          return Container(
-                            margin: const EdgeInsets.only(bottom: 10),
-                            padding: EdgeInsets.all(isPhone ? 10 : 14),
-                            decoration: BoxDecoration(
-                              color: cardGreen,
-                              borderRadius: BorderRadius.circular(22),
-                              border: Border.all(color: cream.withOpacity(.14)),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withOpacity(.22),
-                                  blurRadius: 10,
-                                  offset: const Offset(0, 5),
-                                ),
-                              ],
-                            ),
-                            child: isPhone
-                                ? _mobileProductCard(item, index)
-                                : _desktopProductCard(item, index),
-                          );
-                        },
+  Widget _navItem({
+    required IconData icon,
+    required String label,
+    bool selected = false,
+    VoidCallback? onTap,
+  }) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(15),
+      onTap: onTap,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+        decoration: BoxDecoration(
+          color: selected ? lightGreen.withOpacity(.17) : Colors.transparent,
+          borderRadius: BorderRadius.circular(15),
+          border: Border.all(
+            color: selected ? lightGreen.withOpacity(.28) : Colors.transparent,
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              icon,
+              color: selected ? lightGreen : cream.withOpacity(.68),
+              size: 19,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                label,
+                style: TextStyle(
+                  color: selected ? cream : cream.withOpacity(.68),
+                  fontSize: 13,
+                  fontWeight: selected ? FontWeight.bold : FontWeight.w600,
+                ),
+              ),
+            ),
+            if (label == 'Alerts' && unreadAlertCount() > 0)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                decoration: BoxDecoration(
+                  color: gold,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  unreadAlertCount().toString(),
+                  style: TextStyle(
+                    color: green,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _sidebar(String email) {
+    return Container(
+      width: 250,
+      padding: const EdgeInsets.fromLTRB(18, 18, 18, 16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF07130E),
+        border: Border(
+          right: BorderSide(color: cream.withOpacity(.08)),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Column(
+              children: [
+                SizedBox(
+                  width: double.infinity,
+                  height: 112,
+                  child: Image.asset(
+                    'assets/sale_scout_logo.png',
+                    fit: BoxFit.contain,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'SALE SCOUT',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: cream,
+                    fontSize: 24,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Shopping Intelligence',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: lightGreen,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: .7,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 22),
+          _navItem(icon: Icons.dashboard_rounded, label: 'Dashboard', selected: true),
+          _navItem(icon: Icons.bookmark_rounded, label: 'Tracked Items', onTap: () => showMessage('Tracked items are shown in the main dashboard.')),
+          _navItem(icon: Icons.notifications_active_rounded, label: 'Alerts', onTap: showAlertsSheet),
+          _navItem(icon: Icons.local_offer_rounded, label: 'Market Deals', onTap: () => showMessage('Market deals are inside each tracked item.')),
+          _navItem(icon: Icons.settings_rounded, label: 'Settings', onTap: sendTestBrowserNotification),
+          const Spacer(),
+          _notificationStatusCard(false),
+          const SizedBox(height: 12),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: fieldGreen.withOpacity(.8),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: cream.withOpacity(.10)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  email,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: cream.withOpacity(.70),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: logout,
+                    icon: const Icon(Icons.logout, size: 15),
+                    label: const Text('Logout'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: cream,
+                      side: BorderSide(color: cream.withOpacity(.18)),
+                      padding: const EdgeInsets.symmetric(vertical: 9),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
                       ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _topActionBar({
+    required bool isPhone,
+    required int remaining,
+  }) {
+    return Container(
+      padding: EdgeInsets.all(isPhone ? 10 : 14),
+      decoration: BoxDecoration(
+        color: cardGreen,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: cream.withOpacity(.12)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(.18),
+            blurRadius: 12,
+            offset: const Offset(0, 5),
+          ),
+        ],
+      ),
+      child: isPhone
+          ? Column(
+              children: [
+                _urlInput(remaining, isPhone),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(child: _trackButton(remaining, isPhone)),
+                    const SizedBox(width: 8),
+                    Expanded(child: _scanButton(isPhone)),
+                  ],
+                ),
+              ],
+            )
+          : Row(
+              children: [
+                Expanded(flex: 5, child: _urlInput(remaining, isPhone)),
+                const SizedBox(width: 10),
+                Expanded(flex: 2, child: _trackButton(remaining, isPhone)),
+                const SizedBox(width: 10),
+                Expanded(flex: 2, child: _scanButton(isPhone)),
+              ],
+            ),
+    );
+  }
+
+  Widget _urlInput(int remaining, bool isPhone) {
+    return TextField(
+      controller: urlController,
+      style: TextStyle(color: cream, fontSize: isPhone ? 14 : 15),
+      decoration: InputDecoration(
+        hintText: remaining > 0 ? 'Paste product URL...' : 'Scout item limit reached',
+        hintStyle: TextStyle(color: cream.withOpacity(.52)),
+        prefixIcon: Icon(Icons.link, color: cream.withOpacity(.64)),
+        filled: true,
+        fillColor: fieldGreen,
+        contentPadding: EdgeInsets.symmetric(
+          horizontal: 14,
+          vertical: isPhone ? 12 : 14,
+        ),
+        enabled: remaining > 0 && !apiScanInProgress,
+        enabledBorder: OutlineInputBorder(
+          borderSide: BorderSide(color: cream.withOpacity(.18)),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        disabledBorder: OutlineInputBorder(
+          borderSide: BorderSide(color: gold.withOpacity(.5)),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderSide: BorderSide(color: lightGreen, width: 1.8),
+          borderRadius: BorderRadius.circular(16),
+        ),
+      ),
+    );
+  }
+
+  Widget _trackButton(int remaining, bool isPhone) {
+    return SizedBox(
+      height: isPhone ? 46 : 50,
+      child: ElevatedButton.icon(
+        onPressed: (isLoading || apiScanInProgress) ? null : fetchProduct,
+        icon: isLoading
+            ? const SizedBox(
+                width: 17,
+                height: 17,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.travel_explore, size: 18),
+        label: Text(
+          isLoading || apiScanInProgress
+              ? 'Scouting...'
+              : (remaining > 0 ? 'Track Item' : 'Upgrade'),
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: isPhone ? 13 : 15,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: lightGreen,
+          foregroundColor: green,
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _scanButton(bool isPhone) {
+    return SizedBox(
+      height: isPhone ? 46 : 50,
+      child: OutlinedButton.icon(
+        onPressed: (isRefreshing || apiScanInProgress) ? null : () => refreshPrices(),
+        icon: const Icon(Icons.refresh, size: 18),
+        label: Text(
+          isRefreshing || apiScanInProgress ? 'Scanning...' : 'Scan Now',
+          style: TextStyle(fontSize: isPhone ? 13 : 15, fontWeight: FontWeight.bold),
+        ),
+        style: OutlinedButton.styleFrom(
+          foregroundColor: cream,
+          side: BorderSide(color: cream.withOpacity(.22)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _alertsBanner() {
+    if (alertHistory.isEmpty) return const SizedBox.shrink();
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(18),
+      onTap: showAlertsSheet,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 11),
+        decoration: BoxDecoration(
+          color: fieldGreen.withOpacity(.88),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: lightGreen.withOpacity(.24)),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.notifications_active, color: lightGreen, size: 18),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                unreadAlertCount() > 0
+                    ? '${unreadAlertCount()} new price-drop alert${unreadAlertCount() == 1 ? '' : 's'}'
+                    : '${alertHistory.length} saved price-drop alert${alertHistory.length == 1 ? '' : 's'}',
+                style: TextStyle(
+                  color: cream,
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            Icon(Icons.keyboard_arrow_up, color: cream.withOpacity(.55), size: 18),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _trackedItemsList(bool isPhone) {
+    if (trackedItems.isEmpty) {
+      return Center(
+        child: Container(
+          padding: EdgeInsets.all(isPhone ? 16 : 22),
+          decoration: BoxDecoration(
+            color: cardGreen,
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(color: cream.withOpacity(.14)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.travel_explore, color: lightGreen, size: isPhone ? 34 : 42),
+              const SizedBox(height: 12),
+              Text(
+                'Scout your first deal',
+                style: TextStyle(
+                  color: cream,
+                  fontSize: isPhone ? 19 : 22,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Paste a product URL above. Your Scout plan includes $itemLimit tracked items.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: cream.withOpacity(.68),
+                  fontSize: isPhone ? 13 : 15,
+                ),
               ),
             ],
           ),
         ),
+      );
+    }
+
+    return ListView.builder(
+      physics: const AlwaysScrollableScrollPhysics(),
+      itemCount: trackedItems.length,
+      itemBuilder: (context, index) {
+        final item = trackedItems[index];
+        return _trackedItemCard(item, index, isPhone: isPhone);
+      },
+    );
+  }
+
+  String _itemExpansionKey(ProductItem item) => item.url.isNotEmpty ? item.url : item.title;
+
+  void _toggleItemExpanded(ProductItem item) {
+    final key = _itemExpansionKey(item);
+    setState(() {
+      if (expandedItemKeys.contains(key)) {
+        expandedItemKeys.remove(key);
+      } else {
+        expandedItemKeys.add(key);
+      }
+    });
+  }
+
+  Widget _trackedItemCard(
+    ProductItem item,
+    int index, {
+    required bool isPhone,
+  }) {
+    final expanded = expandedItemKeys.contains(_itemExpansionKey(item));
+    final bestMarketPrice = bestCurrentMarketPrice(item);
+    final bestMarketStore = bestCurrentMarketStore(item);
+    final hasBetterDeal = hasBetterMarketDeal(item);
+    final savings = item.originalPriceAvailable
+        ? item.originalPrice - item.currentPrice
+        : max(0, item.currentPrice - bestMarketPrice);
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOut,
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: EdgeInsets.all(isPhone ? 10 : 12),
+      decoration: BoxDecoration(
+        color: cardGreen,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: expanded ? gold.withOpacity(.35) : cream.withOpacity(.12),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(.20),
+            blurRadius: 12,
+            offset: const Offset(0, 5),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(16),
+            onTap: () => _toggleItemExpanded(item),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: [
+                  _productImage(item, isPhone ? 54 : 64),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    flex: isPhone ? 4 : 5,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          item.title,
+                          maxLines: isPhone ? 2 : 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: cream,
+                            fontSize: isPhone ? 15 : 17,
+                            height: 1.08,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          item.retailer,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: lightGreen,
+                            fontSize: isPhone ? 12 : 13,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (!isPhone) ...[
+                    const SizedBox(width: 10),
+                    _compactPriceColumn(
+                      label: 'Current',
+                      value: '\$${formatMoney(item.currentPrice)}',
+                      accent: lightGreen,
+                    ),
+                    const SizedBox(width: 18),
+                    _compactPriceColumn(
+                      label: 'Best',
+                      value: '\$${formatMoney(bestMarketPrice)}',
+                      subLabel: bestMarketStore,
+                      accent: hasBetterDeal ? gold : cream,
+                    ),
+                    const SizedBox(width: 14),
+                    if (savings > 0)
+                      _smallSavingsPill('\$${formatMoney(savings)}'),
+                  ] else ...[
+                    const SizedBox(width: 8),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(
+                          '\$${formatMoney(item.currentPrice)}',
+                          style: TextStyle(
+                            color: lightGreen,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          'Best \$${formatMoney(bestMarketPrice)}',
+                          style: TextStyle(
+                            color: hasBetterDeal ? gold : cream.withOpacity(.58),
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                  const SizedBox(width: 10),
+                  Icon(
+                    expanded ? Icons.keyboard_arrow_up_rounded : Icons.keyboard_arrow_down_rounded,
+                    color: cream.withOpacity(.72),
+                    size: 24,
+                  ),
+                  IconButton(
+                    tooltip: 'Remove item',
+                    onPressed: () => removeItem(index),
+                    icon: Icon(Icons.delete_outline, color: cream.withOpacity(.64), size: 20),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (expanded) ...[
+            const SizedBox(height: 10),
+            Divider(color: cream.withOpacity(.10), height: 1),
+            const SizedBox(height: 10),
+            _productDetails(item, compact: true),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _compactPriceColumn({
+    required String label,
+    required String value,
+    String? subLabel,
+    required Color accent,
+  }) {
+    return SizedBox(
+      width: 92,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              color: cream.withOpacity(.58),
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: accent,
+              fontSize: 17,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          if (subLabel != null) ...[
+            const SizedBox(height: 1),
+            Text(
+              subLabel,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: cream.withOpacity(.58),
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _smallSavingsPill(String text) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: lightGreen.withOpacity(.15),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: lightGreen.withOpacity(.28)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.south_rounded, color: lightGreen, size: 13),
+          const SizedBox(width: 4),
+          Text(
+            text,
+            style: TextStyle(
+              color: lightGreen,
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _mobileHeader(String email) {
+    return Row(
+      children: [
+        Image.asset(
+          'assets/sale_scout_logo.png',
+          height: 46,
+          width: 46,
+          fit: BoxFit.contain,
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'SALE SCOUT',
+                style: TextStyle(
+                  color: cream,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: .8,
+                ),
+              ),
+              Text(
+                email,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: cream.withOpacity(.58), fontSize: 11),
+              ),
+            ],
+          ),
+        ),
+        IconButton(
+          onPressed: showAlertsSheet,
+          icon: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Icon(Icons.notifications_active, color: lightGreen),
+              if (unreadAlertCount() > 0)
+                Positioned(
+                  right: -3,
+                  top: -3,
+                  child: Container(
+                    width: 16,
+                    height: 16,
+                    decoration: BoxDecoration(
+                      color: gold,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Center(
+                      child: Text(
+                        unreadAlertCount().toString(),
+                        style: TextStyle(
+                          color: green,
+                          fontSize: 9,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        IconButton(
+          onPressed: logout,
+          icon: Icon(Icons.logout, color: cream.withOpacity(.78)),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final email = FirebaseAuth.instance.currentUser?.email ?? '';
+    final remaining = itemLimit - trackedItems.length;
+    final width = MediaQuery.of(context).size.width;
+    final isPhone = width < 700;
+    final useSidebar = width >= 900;
+    final bestMarket = trackedItems.isEmpty
+        ? 0.0
+        : trackedItems.map(bestCurrentMarketPrice).reduce(min);
+
+    final mainContent = Padding(
+      padding: EdgeInsets.fromLTRB(
+        isPhone ? 14 : 20,
+        isPhone ? 10 : 18,
+        isPhone ? 14 : 22,
+        isPhone ? 12 : 22,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (showDropAlert)
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.only(bottom: 10),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: lightGreen,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Text(
+                '🚨 Price drop detected!',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: green,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          if (!useSidebar) ...[
+            _mobileHeader(email),
+            const SizedBox(height: 12),
+          ],
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Dashboard',
+                      style: TextStyle(
+                        color: cream,
+                        fontSize: isPhone ? 24 : 30,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      'Track products, compare the market, and catch price drops.',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: cream.withOpacity(.58),
+                        fontSize: isPhone ? 12 : 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (useSidebar)
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _pill('🎖 $plan Plan', lightGreen, green),
+                    _pill('Watching ${trackedItems.length}/$itemLimit', cream, green),
+                  ],
+                ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          _topActionBar(isPhone: isPhone, remaining: remaining),
+          const SizedBox(height: 14),
+          if (!isPhone)
+            Row(
+              children: [
+                _dashboardStatCard(
+                  icon: Icons.remove_red_eye_rounded,
+                  label: 'Tracked Items',
+                  value: '${trackedItems.length}/$itemLimit',
+                  accent: lightGreen,
+                ),
+                const SizedBox(width: 12),
+                _dashboardStatCard(
+                  icon: Icons.notifications_active_rounded,
+                  label: 'Unread Alerts',
+                  value: unreadAlertCount().toString(),
+                  accent: gold,
+                ),
+                const SizedBox(width: 12),
+                _dashboardStatCard(
+                  icon: Icons.local_offer_rounded,
+                  label: 'Best Market',
+                  value: trackedItems.isEmpty ? '—' : '\$${formatMoney(bestMarket)}',
+                  accent: lightGreen,
+                ),
+                const SizedBox(width: 12),
+                _dashboardStatCard(
+                  icon: apiScanInProgress ? Icons.sync_rounded : Icons.check_circle_rounded,
+                  label: 'Monitoring',
+                  value: apiScanInProgress ? 'Scanning' : 'Active',
+                  accent: apiScanInProgress ? gold : lightGreen,
+                ),
+              ],
+            )
+          else
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _pill('🎖 $plan Plan', lightGreen, green),
+                _pill('Watching ${trackedItems.length}/$itemLimit', cream, green),
+                _pill(apiScanInProgress ? '🟡 Scan Running' : '🟢 Monitoring Active', fieldGreen, cream),
+              ],
+            ),
+          if (!isPhone) const SizedBox(height: 14) else const SizedBox(height: 10),
+          if (!useSidebar) ...[
+            _notificationStatusCard(isPhone),
+            const SizedBox(height: 10),
+          ],
+          _alertsBanner(),
+          if (alertHistory.isNotEmpty) const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Tracked Items',
+                style: TextStyle(
+                  color: cream,
+                  fontSize: isPhone ? 21 : 24,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              Text(
+                '$remaining left',
+                style: TextStyle(
+                  color: remaining > 0 ? lightGreen : gold,
+                  fontWeight: FontWeight.bold,
+                  fontSize: isPhone ? 12 : 14,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Expanded(child: _trackedItemsList(isPhone)),
+        ],
+      ),
+    );
+
+    return Scaffold(
+      backgroundColor: green,
+      body: SafeArea(
+        child: useSidebar
+            ? Row(
+                children: [
+                  _sidebar(email),
+                  Expanded(child: mainContent),
+                ],
+              )
+            : mainContent,
       ),
     );
   }
