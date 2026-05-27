@@ -502,11 +502,7 @@ async function scrapeNike(url) {
     });
 
     const page = await browser.newPage({
-      viewport: {
-        width: 1200,
-        height: 900,
-      },
-
+      viewport: { width: 1200, height: 900 },
       userAgent:
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36',
     });
@@ -514,9 +510,7 @@ async function scrapeNike(url) {
     await page.route('**/*', (route) => {
       const type = route.request().resourceType();
 
-      if (
-        ['image', 'font', 'media'].includes(type)
-      ) {
+      if (['image', 'font', 'media', 'stylesheet'].includes(type)) {
         route.abort();
       } else {
         route.continue();
@@ -525,30 +519,27 @@ async function scrapeNike(url) {
 
     await page.goto(url, {
       waitUntil: 'domcontentloaded',
-      timeout: 90000,
+      timeout: 30000,
     });
 
-    await page.waitForTimeout(5000);
+    await page.waitForLoadState('domcontentloaded', {
+      timeout: 10000,
+    });
+
+    await page.waitForTimeout(1500);
 
     const result = await page.evaluate(() => {
       const getMeta = (name) => {
         const el =
-          document.querySelector(
-            `meta[property="${name}"]`
-          ) ||
-          document.querySelector(
-            `meta[name="${name}"]`
-          );
+          document.querySelector(`meta[property="${name}"]`) ||
+          document.querySelector(`meta[name="${name}"]`);
 
-        return el
-          ? el.getAttribute('content')
-          : '';
+        return el ? el.getAttribute('content') : '';
       };
 
       const title =
         getMeta('og:title') ||
-        document.querySelector('h1')
-          ?.innerText ||
+        document.querySelector('h1')?.innerText ||
         document.title ||
         'Nike Product';
 
@@ -557,165 +548,71 @@ async function scrapeNike(url) {
         getMeta('twitter:image') ||
         '';
 
-      const currentPriceEl =
-        document.querySelector(
-          '[data-testid="currentPrice-container"]'
-        ) ||
-        document.querySelector(
-          '[data-test="currentPrice-container"]'
-        );
-
-      const originalPriceEl =
-        document.querySelector(
-          '[data-testid="initialPrice-container"]'
-        ) ||
-        document.querySelector(
-          '[data-test="initialPrice-container"]'
-        );
-
-      const currentPriceText =
-        currentPriceEl
-          ? currentPriceEl.innerText ||
-            currentPriceEl.textContent ||
-            ''
-          : '';
-
-      const originalPriceText =
-        originalPriceEl
-          ? originalPriceEl.innerText ||
-            originalPriceEl.textContent ||
-            ''
-          : '';
-
-      const visiblePriceCandidates =
-        Array.from(
-          document.querySelectorAll('body *')
-        )
-          .map((el) => {
-            const rect =
-              el.getBoundingClientRect();
-
-            return {
-              text:
-                (
-                  el.innerText ||
-                  el.textContent ||
-                  ''
-                ).trim(),
-
-              visible:
-                rect.width > 0 &&
-                rect.height > 0 &&
-                rect.top >= 0 &&
-                rect.top < 900,
-            };
-          })
-          .filter((item) => item.visible)
-          .filter((item) =>
-            item.text.includes('$')
-          )
-          .filter(
-            (item) => item.text.length <= 100
-          );
-
-      const pageText = `${
-        document.body.innerText || ''
-      } ${
-        document.documentElement.innerHTML || ''
-      }`.toUpperCase();
+      const bodyText = document.body.innerText || '';
+      const htmlText = document.documentElement.innerHTML || '';
+      const combinedText = `${bodyText} ${htmlText}`;
 
       const skuMatch =
-        pageText.match(
-          /\b[A-Z0-9]{6}-[0-9]{3}\b/
-        ) ||
-        pageText.match(
-          /\b[A-Z]{2}[0-9]{4}-[0-9]{3}\b/
-        );
+        combinedText.toUpperCase().match(/\b[A-Z0-9]{6}-[0-9]{3}\b/) ||
+        combinedText.toUpperCase().match(/\b[A-Z]{2}[0-9]{4}-[0-9]{3}\b/);
+
+      const priceMatches = bodyText.match(/\$[0-9]+(?:\.[0-9]{1,2})?/g) || [];
 
       return {
         title,
         imageUrl,
-        currentPriceText,
-        originalPriceText,
-        visiblePriceCandidates,
         sku: skuMatch ? skuMatch[0] : null,
+        priceMatches,
       };
     });
 
-    const currentPrice = cleanPrice(
-      result.currentPriceText
-    );
+    const prices = result.priceMatches
+      .map((priceText) => cleanPrice(priceText))
+      .filter((price) => price !== null);
 
-    const originalPrice = cleanPrice(
-      result.originalPriceText
-    );
+    const uniquePrices = [...new Set(prices)].sort((a, b) => a - b);
 
-    let finalCurrentPrice = currentPrice;
-    let finalOriginalPrice = originalPrice;
+    const finalCurrentPrice = uniquePrices[0] || 0;
+    const finalOriginalPrice =
+      uniquePrices.length > 1 ? uniquePrices[uniquePrices.length - 1] : null;
 
-    if (!finalCurrentPrice) {
-      const fallbackPrices =
-        result.visiblePriceCandidates
-          .map((item) =>
-            cleanPrice(item.text)
-          )
-          .filter(
-            (price) => price !== null
-          );
-
-      const uniquePrices = [
-        ...new Set(fallbackPrices),
-      ].sort((a, b) => a - b);
-
-      finalCurrentPrice =
-        uniquePrices[0] || 0;
-
-      finalOriginalPrice =
-        uniquePrices.length > 1
-          ? uniquePrices[
-              uniquePrices.length - 1
-            ]
-          : null;
-    }
-
-    const finalSku =
-      result.sku ||
-      extractSkuFromText(url);
+    const finalSku = result.sku || extractSkuFromText(url);
 
     return {
       title: cleanNikeTitle(result.title),
       sku: finalSku,
       retailer: 'Nike',
-      currentPrice:
-        finalCurrentPrice || 0,
-
+      currentPrice: finalCurrentPrice,
       originalPrice:
-        finalOriginalPrice &&
-        finalOriginalPrice >
-          finalCurrentPrice
+        finalOriginalPrice && finalOriginalPrice > finalCurrentPrice
           ? finalOriginalPrice
           : null,
-
-      originalPriceAvailable:
-        Boolean(
-          finalOriginalPrice &&
-            finalOriginalPrice >
-              finalCurrentPrice
-        ),
-
+      originalPriceAvailable: Boolean(
+        finalOriginalPrice && finalOriginalPrice > finalCurrentPrice
+      ),
       imageUrl: result.imageUrl || '',
+      source: 'nike_fast_scan_v1',
+    };
+  } catch (error) {
+    console.error('NIKE FAST SCRAPER ERROR:', error.message);
 
-      source: 'nike_sku_detection_v1',
+    return {
+      title: 'Nike Product',
+      sku: extractSkuFromText(url),
+      retailer: 'Nike',
+      currentPrice: 0,
+      originalPrice: null,
+      originalPriceAvailable: false,
+      imageUrl: '',
+      source: 'nike_fast_scan_failed',
+      error: error.message,
     };
   } finally {
     if (browser) {
       try {
         await browser.close();
       } catch (closeError) {
-        console.error(
-          'Browser close failed:',
-          closeError.message
-        );
+        console.error('Browser close failed:', closeError.message);
       }
     }
   }
@@ -1427,9 +1324,6 @@ app.get('/debug-target-price-object', async (req, res) => {
 });
 app.get('/send-price-drop-push', async (req, res) => {
   const token = req.query.token;
-  const title = req.query.title || 'Tracked item';
-  const oldPrice = req.query.oldPrice;
-  const newPrice = req.query.newPrice;
 
   if (!token) {
     return res.status(400).json({
@@ -1437,18 +1331,38 @@ app.get('/send-price-drop-push', async (req, res) => {
     });
   }
 
+  const productTitle = req.query.title || 'Tracked Item';
+  const oldPrice = req.query.oldPrice || '100';
+  const newPrice = req.query.newPrice || '75';
+  const clickUrl =
+    req.query.url || 'https://sale-scout-ff2a5.web.app';
+
   try {
     const message = {
+      token,
+
       notification: {
         title: '🔥 Price Drop Detected',
-        body: 'Price drop detected on tracked item',
+        body: `${productTitle} dropped from $${oldPrice} to $${newPrice}`,
       },
+
+      data: {
+        click_action: clickUrl,
+        url: clickUrl,
+        title: '🔥 Price Drop Detected',
+        body: `${productTitle} dropped from $${oldPrice} to $${newPrice}`,
+      },
+
       webpush: {
+        fcmOptions: {
+          link: clickUrl,
+        },
         notification: {
-          icon: '/icons/Icon-192.png',
+          icon: 'https://sale-scout-ff2a5.web.app/icons/Icon-192.png',
+          badge: 'https://sale-scout-ff2a5.web.app/icons/Icon-192.png',
+          requireInteraction: true,
         },
       },
-      token,
     };
 
     const response = await admin.messaging().send(message);
@@ -1464,9 +1378,8 @@ app.get('/send-price-drop-push', async (req, res) => {
       error: error.message,
     });
   }
+});
 
-});app.listen(PORT, () => {
-  console.log(
-    `Server running on port ${PORT}`
-  );
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
