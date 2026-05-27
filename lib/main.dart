@@ -1840,9 +1840,12 @@ class _HomePageState extends State<HomePage> {
 
   Widget _trackButton(int remaining, bool isPhone) {
     return SizedBox(
-      height: isPhone ? 46 : 50,
+      height: isPhone ? 54 : 50,
+      width: double.infinity,
       child: ElevatedButton.icon(
-        onPressed: (isLoading || apiScanInProgress) ? null : fetchProduct,
+        onPressed: (isLoading || apiScanInProgress || remaining <= 0)
+            ? null
+            : fetchProduct,
         icon: isLoading
             ? const SizedBox(
                 width: 17,
@@ -1856,14 +1859,19 @@ class _HomePageState extends State<HomePage> {
               : (remaining > 0 ? 'Track Item' : 'Upgrade'),
           textAlign: TextAlign.center,
           style: TextStyle(
-            fontSize: isPhone ? 13 : 15,
+            fontSize: isPhone ? 14 : 15,
             fontWeight: FontWeight.bold,
           ),
         ),
         style: ElevatedButton.styleFrom(
           backgroundColor: lightGreen,
           foregroundColor: green,
+          disabledBackgroundColor: lightGreen.withOpacity(.38),
+          disabledForegroundColor: green.withOpacity(.55),
           elevation: 0,
+          minimumSize: Size(double.infinity, isPhone ? 54 : 50),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+          tapTargetSize: MaterialTapTargetSize.padded,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
           ),
@@ -1874,17 +1882,34 @@ class _HomePageState extends State<HomePage> {
 
   Widget _scanButton(bool isPhone) {
     return SizedBox(
-      height: isPhone ? 46 : 50,
+      height: isPhone ? 54 : 50,
+      width: double.infinity,
       child: OutlinedButton.icon(
-        onPressed: (isRefreshing || apiScanInProgress) ? null : () => refreshPrices(),
-        icon: const Icon(Icons.refresh, size: 18),
+        onPressed: (isRefreshing || apiScanInProgress)
+            ? null
+            : () => refreshPrices(),
+        icon: isRefreshing || apiScanInProgress
+            ? const SizedBox(
+                width: 17,
+                height: 17,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.refresh, size: 18),
         label: Text(
           isRefreshing || apiScanInProgress ? 'Scanning...' : 'Scan Now',
-          style: TextStyle(fontSize: isPhone ? 13 : 15, fontWeight: FontWeight.bold),
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: isPhone ? 14 : 15,
+            fontWeight: FontWeight.bold,
+          ),
         ),
         style: OutlinedButton.styleFrom(
           foregroundColor: cream,
+          disabledForegroundColor: cream.withOpacity(.45),
           side: BorderSide(color: cream.withOpacity(.22)),
+          minimumSize: Size(double.infinity, isPhone ? 54 : 50),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+          tapTargetSize: MaterialTapTargetSize.padded,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
           ),
