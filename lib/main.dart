@@ -529,18 +529,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   void startMonitoring() {
-    monitorTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    monitorTimer = Timer.periodic(const Duration(minutes: 60), (_) {
       if (!mounted) return;
-
-      setState(() {
-        countdown--;
-      });
-
-      if (countdown <= 0) {
-        countdown = 3600;
-
-        refreshPrices(autoScan: true);
-      }
+      refreshPrices(autoScan: true);
     });
   }
 
@@ -1773,13 +1764,7 @@ class _HomePageState extends State<HomePage> {
         color: cardGreen,
         borderRadius: BorderRadius.circular(22),
         border: Border.all(color: cream.withOpacity(.12)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(.18),
-            blurRadius: 12,
-            offset: const Offset(0, 5),
-          ),
-        ],
+
       ),
       child: isPhone
           ? Column(
@@ -1994,11 +1979,13 @@ class _HomePageState extends State<HomePage> {
     }
 
     return ListView.builder(
-      physics: const AlwaysScrollableScrollPhysics(),
+      physics: const ClampingScrollPhysics(),
       itemCount: trackedItems.length,
       itemBuilder: (context, index) {
         final item = trackedItems[index];
-        return _trackedItemCard(item, index, isPhone: isPhone);
+        return RepaintBoundary(
+          child: _trackedItemCard(item, index, isPhone: isPhone),
+        );
       },
     );
   }
@@ -2029,9 +2016,7 @@ class _HomePageState extends State<HomePage> {
         ? item.originalPrice - item.currentPrice
         : max(0, item.currentPrice - bestMarketPrice);
 
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 180),
-      curve: Curves.easeOut,
+    return Container(
       margin: const EdgeInsets.only(bottom: 10),
       padding: EdgeInsets.all(isPhone ? 10 : 12),
       decoration: BoxDecoration(
@@ -2040,18 +2025,12 @@ class _HomePageState extends State<HomePage> {
         border: Border.all(
           color: expanded ? gold.withOpacity(.35) : cream.withOpacity(.12),
         ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(.20),
-            blurRadius: 12,
-            offset: const Offset(0, 5),
-          ),
-        ],
+
       ),
       child: Column(
         children: [
-          InkWell(
-            borderRadius: BorderRadius.circular(16),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
             onTap: () => _toggleItemExpanded(item),
             child: Padding(
               padding: const EdgeInsets.symmetric(vertical: 2),
@@ -2537,6 +2516,7 @@ class _HomePageState extends State<HomePage> {
         width: size,
         height: size,
         fit: BoxFit.cover,
+        gaplessPlayback: true,
         errorBuilder: (_, __, ___) => Container(
           width: size,
           height: size,
