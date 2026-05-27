@@ -529,9 +529,18 @@ class _HomePageState extends State<HomePage> {
   }
 
   void startMonitoring() {
-    monitorTimer = Timer.periodic(const Duration(minutes: 60), (_) {
+    monitorTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
-      refreshPrices(autoScan: true);
+
+      setState(() {
+        countdown--;
+      });
+
+      if (countdown <= 0) {
+        countdown = 3600;
+
+        refreshPrices(autoScan: true);
+      }
     });
   }
 
@@ -1068,7 +1077,7 @@ class _HomePageState extends State<HomePage> {
 
     alertHistory.insert(0, alert);
 
-    sendBrowserPriceDropNotification(oldItem: oldItem, newItem: newItem);
+    
 
     if (alertHistory.length > 25) {
       alertHistory = alertHistory.take(25).toList();
@@ -1764,7 +1773,13 @@ class _HomePageState extends State<HomePage> {
         color: cardGreen,
         borderRadius: BorderRadius.circular(22),
         border: Border.all(color: cream.withOpacity(.12)),
-
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(.18),
+            blurRadius: 12,
+            offset: const Offset(0, 5),
+          ),
+        ],
       ),
       child: isPhone
           ? Column(
@@ -1825,12 +1840,9 @@ class _HomePageState extends State<HomePage> {
 
   Widget _trackButton(int remaining, bool isPhone) {
     return SizedBox(
-      height: isPhone ? 54 : 50,
-      width: double.infinity,
+      height: isPhone ? 46 : 50,
       child: ElevatedButton.icon(
-        onPressed: (isLoading || apiScanInProgress || remaining <= 0)
-            ? null
-            : fetchProduct,
+        onPressed: (isLoading || apiScanInProgress) ? null : fetchProduct,
         icon: isLoading
             ? const SizedBox(
                 width: 17,
@@ -1844,19 +1856,14 @@ class _HomePageState extends State<HomePage> {
               : (remaining > 0 ? 'Track Item' : 'Upgrade'),
           textAlign: TextAlign.center,
           style: TextStyle(
-            fontSize: isPhone ? 14 : 15,
+            fontSize: isPhone ? 13 : 15,
             fontWeight: FontWeight.bold,
           ),
         ),
         style: ElevatedButton.styleFrom(
           backgroundColor: lightGreen,
           foregroundColor: green,
-          disabledBackgroundColor: lightGreen.withOpacity(.38),
-          disabledForegroundColor: green.withOpacity(.55),
           elevation: 0,
-          minimumSize: Size(double.infinity, isPhone ? 54 : 50),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-          tapTargetSize: MaterialTapTargetSize.padded,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
           ),
@@ -1867,34 +1874,17 @@ class _HomePageState extends State<HomePage> {
 
   Widget _scanButton(bool isPhone) {
     return SizedBox(
-      height: isPhone ? 54 : 50,
-      width: double.infinity,
+      height: isPhone ? 46 : 50,
       child: OutlinedButton.icon(
-        onPressed: (isRefreshing || apiScanInProgress)
-            ? null
-            : () => refreshPrices(),
-        icon: isRefreshing || apiScanInProgress
-            ? const SizedBox(
-                width: 17,
-                height: 17,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            : const Icon(Icons.refresh, size: 18),
+        onPressed: (isRefreshing || apiScanInProgress) ? null : () => refreshPrices(),
+        icon: const Icon(Icons.refresh, size: 18),
         label: Text(
           isRefreshing || apiScanInProgress ? 'Scanning...' : 'Scan Now',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            fontSize: isPhone ? 14 : 15,
-            fontWeight: FontWeight.bold,
-          ),
+          style: TextStyle(fontSize: isPhone ? 13 : 15, fontWeight: FontWeight.bold),
         ),
         style: OutlinedButton.styleFrom(
           foregroundColor: cream,
-          disabledForegroundColor: cream.withOpacity(.45),
           side: BorderSide(color: cream.withOpacity(.22)),
-          minimumSize: Size(double.infinity, isPhone ? 54 : 50),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-          tapTargetSize: MaterialTapTargetSize.padded,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
           ),
@@ -1979,13 +1969,11 @@ class _HomePageState extends State<HomePage> {
     }
 
     return ListView.builder(
-      physics: const ClampingScrollPhysics(),
+      physics: const AlwaysScrollableScrollPhysics(),
       itemCount: trackedItems.length,
       itemBuilder: (context, index) {
         final item = trackedItems[index];
-        return RepaintBoundary(
-          child: _trackedItemCard(item, index, isPhone: isPhone),
-        );
+        return _trackedItemCard(item, index, isPhone: isPhone);
       },
     );
   }
@@ -2016,7 +2004,9 @@ class _HomePageState extends State<HomePage> {
         ? item.originalPrice - item.currentPrice
         : max(0, item.currentPrice - bestMarketPrice);
 
-    return Container(
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOut,
       margin: const EdgeInsets.only(bottom: 10),
       padding: EdgeInsets.all(isPhone ? 10 : 12),
       decoration: BoxDecoration(
@@ -2025,12 +2015,18 @@ class _HomePageState extends State<HomePage> {
         border: Border.all(
           color: expanded ? gold.withOpacity(.35) : cream.withOpacity(.12),
         ),
-
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(.20),
+            blurRadius: 12,
+            offset: const Offset(0, 5),
+          ),
+        ],
       ),
       child: Column(
         children: [
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
+          InkWell(
+            borderRadius: BorderRadius.circular(16),
             onTap: () => _toggleItemExpanded(item),
             child: Padding(
               padding: const EdgeInsets.symmetric(vertical: 2),
@@ -2516,7 +2512,6 @@ class _HomePageState extends State<HomePage> {
         width: size,
         height: size,
         fit: BoxFit.cover,
-        gaplessPlayback: true,
         errorBuilder: (_, __, ___) => Container(
           width: size,
           height: size,
