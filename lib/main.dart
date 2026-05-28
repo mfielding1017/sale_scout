@@ -1077,7 +1077,7 @@ class _HomePageState extends State<HomePage> {
 
     alertHistory.insert(0, alert);
 
-    
+    sendBrowserPriceDropNotification(oldItem: oldItem, newItem: newItem);
 
     if (alertHistory.length > 25) {
       alertHistory = alertHistory.take(25).toList();
