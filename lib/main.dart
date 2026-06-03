@@ -1046,6 +1046,12 @@ class _HomePageState extends State<HomePage> {
       if (!html.Notification.supported) return;
       if (html.Notification.permission != 'granted') return;
 
+      // Only show the in-app notification when the tab is actually in the
+      // foreground. When the tab is backgrounded/closed, the FCM push (and its
+      // service worker) handles the notification instead. This prevents the
+      // user from receiving two notifications for the same price drop.
+      if (html.document.visibilityState != 'visible') return;
+
       final savings = oldItem.currentPrice - newItem.currentPrice;
 
       html.Notification(
